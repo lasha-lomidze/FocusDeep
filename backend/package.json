@@ -1,0 +1,17 @@
+{
+  "name": "focusdeep-backend",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "node --watch src/server.js",
+    "start": "node src/server.js",
+    "backup": "node scripts/backup.js",
+    "import": "node scripts/import-data.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  }
+}

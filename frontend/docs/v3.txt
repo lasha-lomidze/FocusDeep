@@ -1,0 +1,783 @@
+import { useEffect, useState, useRef } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
+} from "recharts";
+import { motion, AnimatePresence } from "framer-motion";
+import { db } from "./db/db";
+import { formatDuration, msToHours, hoursToMs } from "./utils/helpers";
+import { useDB } from "./db/useDb";
+import { DEFAULT_GROUP, DEFAULT_CATEGORY } from "./utils/const";
+import { calculateStats } from "./utils/stats";
+
+/* -------------------- Design tokens -------------------- */
+const ACCENT = "#6B21A8"; // calm purple accent for interactive bits
+const ACCENT_SOFT = "#7c3aed";
+const MUTED_BG = "rgba(255,255,255,0.03)";
+const CARD_BG = "rgba(255,255,255,0.04)";
+const BORDER = "rgba(255,255,255,0.06)";
+
+/* -------------------- Small UI primitives -------------------- */
+function ProgressBar({ value, max = 100, color = ACCENT_SOFT, className = "", height = 10 }) {
+  const pct = max <= 0 ? 0 : Math.min(100, Math.round((value / max) * 100));
+  return (
+    <div
+      className={`w-full rounded-full overflow-hidden ${className}`}
+      style={{ height, background: "rgba(255,255,255,0.04)", boxShadow: "inset 0 1px 2px rgba(0,0,0,0.5)" }}
+    >
+      <div
+        className="h-full transition-all"
+        style={{
+          width: `${pct}%`,
+          backgroundColor: color, // solid fill (no gradient)
+        }}
+      />
+    </div>
+  );
+}
+
+function SmallBadge({ children, tone = "muted" }) {
+  const map = {
+    muted: "bg-[rgba(255,255,255,0.04)] text-white/90",
+    green: "bg-emerald-500 text-black font-semibold",
+    red: "bg-rose-500 text-white font-semibold",
+    accent: "bg-yellow-400 text-black font-semibold",
+  };
+  return <span className={`px-2 py-0.5 rounded text-xs ${map[tone] || map.muted}`}>{children}</span>;
+}
+
+/* -------------------- CustomSelect (replaces native selects) --------------------
+  - options: [{ value, label, color? }]
+  - value: selected value
+  - onChange(v)
+  - placeholder optional
+  - neutral, keyboard-friendly-ish (click/tap UI)
+*/
+function CustomSelect({ options = [], value, onChange, placeholder = "Select...", className = "" }) {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef(null);
+
+  useEffect(() => {
+    function onDoc(e) {
+      if (!rootRef.current) return;
+      if (!rootRef.current.contains(e.target)) setOpen(false);
+    }
+    window.addEventListener("pointerdown", onDoc);
+    return () => window.removeEventListener("pointerdown", onDoc);
+  }, []);
+
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div ref={rootRef} className={`relative ${className}`}>
+      <button
+        type="button"
+        onClick={() => setOpen((s) => !s)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded bg-[rgba(255,255,255,0.03)] border"
+        style={{ borderColor: BORDER }}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-2 truncate">
+          {selected ? (
+            <>
+              {selected.color && <span style={{ background: selected.color }} className="inline-block w-2 h-2 rounded-sm" />}
+              <span className="text-sm truncate">{selected.label}</span>
+            </>
+          ) : (
+            <span className="text-sm text-white/60 truncate">{placeholder}</span>
+          )}
+        </div>
+
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" className={`transform transition-transform ${open ? "rotate-180" : ""}`}>
+          <path d="M6 9l6 6 6-6" stroke="white" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+
+      {open && (
+        <motion.ul
+          initial={{ opacity: 0, y: -6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: -6 }}
+          role="listbox"
+          className="absolute z-50 mt-2 w-full max-h-56 overflow-auto rounded bg-[#071226] border shadow-lg"
+          style={{ borderColor: BORDER }}
+        >
+          {options.map((o) => (
+            <li
+              key={o.value}
+              role="option"
+              onClick={() => {
+                onChange(o.value);
+                setOpen(false);
+              }}
+              className="px-3 py-2 text-sm cursor-pointer flex items-center justify-between gap-2 hover:bg-[rgba(255,255,255,0.02)]"
+            >
+              <div className="flex items-center gap-2 truncate">
+                {o.color && <span style={{ background: o.color }} className="inline-block w-2 h-2 rounded-sm" />}
+                <span className="truncate">{o.label}</span>
+              </div>
+              {value === o.value && (
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path d="M20 6L9 17l-5-5" stroke={ACCENT} strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              )}
+            </li>
+          ))}
+        </motion.ul>
+      )}
+    </div>
+  );
+}
+
+/* -------------------- Main Component (logic unchanged) -------------------- */
+export default function App() {
+  const {
+    data,
+    loaded,
+    addGroup,
+    updateGroup,
+    deleteGroup,
+    addCategory,
+    updateCategory,
+    deleteCategory,
+    addManualSession,
+    saveEditedSession,
+    deleteSession,
+    startTimer,
+    changeRunningCategory,
+    stopTimer,
+    updateSettings,
+    refreshAll,
+  } = useDB();
+
+  // local UI state
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (!loaded) return;
+    if (!data.running) return;
+    const interval = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [data.running, loaded]);
+
+  const [page, setPage] = useState("dashboard");
+  const [selectedCategory, setSelectedCategory] = useState(DEFAULT_CATEGORY);
+  useEffect(() => {
+    if (!loaded) return;
+    setSelectedCategory(data.categories[0] ? data.categories[0].id : DEFAULT_CATEGORY);
+  }, [data.categories, loaded]);
+
+  const [editingSession, setEditingSession] = useState(null);
+  const [manual, setManual] = useState({ date: "", start: "", end: "", note: "" });
+  const [chartMode, setChartMode] = useState("category");
+  const [customMerge, setCustomMerge] = useState([]);
+  const [undo, setUndo] = useState(null); // {type, payload, expireAt}
+
+  /* -------------------- Undo handling -------------------- */
+  function startUndo(payload) {
+    const expireAt = Date.now() + 9000;
+    setUndo({ ...payload, expireAt });
+    setTimeout(() => {
+      setUndo((u) => (u && u.expireAt === expireAt ? null : u));
+    }, 9200);
+  }
+
+  async function performUndo() {
+    if (!undo) return;
+    const u = undo;
+    try {
+      if (u.type === "deleteSession") {
+        await db.sessions.put(u.payload);
+        await refreshAll();
+      } else if (u.type === "deleteCategory") {
+        await db.categories.put(u.payload);
+        await refreshAll();
+      } else if (u.type === "deleteGroup") {
+        await db.groups.put(u.payload);
+        await refreshAll();
+      }
+    } catch (e) {
+      console.error("performUndo", e);
+    }
+    setUndo(null);
+  }
+
+  /* -------------------- Actions wiring -------------------- */
+  const handleStartTimer = async (catId) => {
+    await startTimer(catId);
+  };
+
+  const handleChangeRunningCategory = async (newCatId) => {
+    await changeRunningCategory(newCatId);
+  };
+
+  const handleStopTimer = async (note = "") => {
+    await stopTimer(note);
+  };
+
+  const handleAddManualSession = async (catId, startISO, endISO, note = "") => {
+    const ok = await addManualSession(catId, startISO, endISO, note);
+    return ok;
+  };
+
+  const handleSaveEditedSession = async (session) => {
+    await saveEditedSession(session);
+    setEditingSession(null);
+  };
+
+  const handleDeleteSession = async (id) => {
+    if (!confirm("Delete session?")) return;
+    const payload = await deleteSession(id);
+    if (payload) startUndo({ type: "deleteSession", payload });
+  };
+
+  const handleAddCategory = async (name, color, groupId) => {
+    const id = await addCategory(name, color, groupId);
+    setSelectedCategory(id);
+  };
+
+  const handleUpdateCategory = async (cat) => {
+    await updateCategory(cat);
+  };
+
+  const handleDeleteCategory = async (catId) => {
+    if (!confirm("Delete category? Sessions will move to General.")) return;
+    const payload = await deleteCategory(catId);
+    if (payload) startUndo({ type: "deleteCategory", payload });
+  };
+
+  const handleAddGroup = async (name = "New group") => {
+    await addGroup(name);
+  };
+
+  const handleUpdateGroup = async (g) => {
+    await updateGroup(g);
+  };
+
+  const handleDeleteGroup = async (groupId) => {
+    if (!confirm("Delete group? Its categories will be moved to Ungrouped.")) return;
+    const payload = await deleteGroup(groupId);
+    if (payload) startUndo({ type: "deleteGroup", payload });
+  };
+
+  const handleUpdateSettings = async (s) => {
+    await updateSettings(s);
+  };
+
+  /* -------------------- Stats (same) -------------------- */
+  const stats = calculateStats(data);
+
+  /* -------------------- UI Helpers -------------------- */
+  function groupNameForCategory(catId) {
+    const cat = data.categories.find((c) => c.id === catId);
+    if (!cat) return "";
+    const g = data.groups.find((x) => x.id === cat.groupId);
+    return g ? g.name : "";
+  }
+
+  function colorForLeft(leftMs, goalMs) {
+    if (goalMs === 0) return "muted";
+    const progress = 1 - leftMs / goalMs;
+    if (progress >= 1) return "green";
+    if (progress >= 0.6) return "accent";
+    if (progress >= 0.3) return "muted";
+    return "red";
+  }
+
+  if (!loaded) {
+    return (
+      <div className="min-h-screen p-6 flex items-center justify-center bg-linear-to-br from-[#041025] to-[#071028] text-white">
+        <div className="text-center">
+          <div className="text-2xl font-semibold mb-2">Loading…</div>
+          <div className="text-sm text-white/70">Preparing your data</div>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- Render (refined V2) -------------------- */
+  return (
+    <div className="min-h-screen p-6 bg-linear-to-br from-[#051022] to-[#08132b] text-white font-sans">
+      <div className="max-w-7xl mx-auto">
+        <header className="flex items-center justify-between mb-6">
+          <div className="flex items-start gap-4">
+            <div className="rounded-lg p-3" style={{ background: "linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01))", boxShadow: "0 10px 30px rgba(0,0,0,0.6)" }}>
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <rect x="1.5" y="1.5" width="21" height="21" rx="6" stroke="white" strokeWidth="1.2" opacity="0.06" />
+                <path d="M6 12h12M6 8h12M6 16h12" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-2xl font-extrabold tracking-tight leading-tight">Timers • Deep Analysis</h1>
+              <div className="text-xs text-white/70 mt-1">Control, correct, and see exactly how much time you need to hit goals.</div>
+            </div>
+          </div>
+
+          <nav className="flex gap-2 items-center">
+            <NavButton active={page === "dashboard"} onClick={() => setPage("dashboard")}>Overview</NavButton>
+            <NavButton active={page === "sessions"} onClick={() => setPage("sessions")}>Sessions</NavButton>
+            <NavButton active={page === "charts"} onClick={() => setPage("charts")}>Charts</NavButton>
+            <NavButton active={page === "settings"} onClick={() => setPage("settings")}>Settings</NavButton>
+            {/* removed sessions count from corner per your request */}
+          </nav>
+        </header>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          {/* Sidebar */}
+          <aside className="md:col-span-1 bg-[rgba(255,255,255,0.02)] backdrop-blur-sm p-4 rounded-2xl shadow-xl" style={{ border: `1px solid ${BORDER}` }}>
+            <h2 className="font-semibold mb-3 text-lg">Quick timer</h2>
+
+            <div className="flex flex-wrap gap-2 mb-4">
+              {data.categories.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setSelectedCategory(c.id)}
+                  className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium transition-transform`}
+                  style={{
+                    background: selectedCategory === c.id ? "rgba(255,255,255,0.05)" : MUTED_BG,
+                    color: "white",
+                    border: `1px solid ${BORDER}`,
+                  }}
+                >
+                  <span style={{ width: 10, height: 10, background: c.color, borderRadius: 4, display: "inline-block" }} />
+                  {c.name}
+                </button>
+              ))}
+            </div>
+
+            <div className="mb-4">
+              {data.running ? (
+                <div className="flex flex-col gap-3">
+                  <div className="text-sm text-white/80">Running: <strong className="text-white">{data.categories.find((x) => x.id === data.running.categoryId)?.name}</strong> — <span className="italic text-xs text-white/60">{groupNameForCategory(data.running.categoryId)}</span></div>
+
+                  <div className="text-2xl font-bold">{formatDuration(nowMs - new Date(data.running.startISO))}</div>
+
+                  <div className="flex gap-2 items-center">
+                    {/* pill chooser instead of native select */}
+                    <div className="flex-1">
+                      <div className="text-xs text-white/60 mb-2">Change running category</div>
+                      <div className="flex flex-wrap gap-2">
+                        {data.categories.map((c) => (
+                          <button
+                            key={c.id}
+                            onClick={() => handleChangeRunningCategory(c.id)}
+                            className={`px-3 py-1 rounded-full text-sm ${data.running.categoryId === c.id ? "bg-white text-black" : "bg-[rgba(255,255,255,0.02)] text-white/90"}`}
+                            style={{ border: `1px solid ${BORDER}` }}
+                          >
+                            <span style={{ width: 8, height: 8, background: c.color, borderRadius: 3, display: "inline-block", marginRight: 8 }} />
+                            {c.name}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <button onClick={() => handleStopTimer()} className="px-4 py-2 rounded-lg bg-rose-600 text-white font-semibold shadow">Stop</button>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button onClick={async () => {
+                      const note = prompt("Note for this session (optional)") || "";
+                      await handleStopTimer(note);
+                    }} className="px-3 py-2 rounded-lg border bg-[rgba(255,255,255,0.01)]" style={{ borderColor: BORDER }}>Stop + note</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <CustomSelect
+                    options={data.categories.map((c) => ({ value: c.id, label: `${c.name} (${data.groups.find(g => g.id === c.groupId)?.name || ''})`, color: c.color }))}
+                    value={selectedCategory}
+                    onChange={(v) => setSelectedCategory(v)}
+                    className="flex-1"
+                    placeholder="Choose category"
+                  />
+                  <button onClick={() => handleStartTimer(selectedCategory)} className="px-4 py-2 rounded-lg bg-[rgba(107,33,168,0.95)] text-white font-semibold shadow">Start</button>
+                </div>
+              )}
+            </div>
+
+            <details className="mb-4 bg-[rgba(255,255,255,0.01)] p-3 rounded-lg">
+              <summary className="text-sm font-medium cursor-pointer">➕ Add manual session</summary>
+              <div className="mt-3 flex flex-col gap-3">
+                <CustomSelect
+                  options={data.categories.map((c) => ({ value: c.id, label: c.name, color: c.color }))}
+                  value={selectedCategory}
+                  onChange={(v) => setSelectedCategory(v)}
+                />
+                <div className="flex gap-2">
+                  <input type="date" value={manual.date} onChange={(e) => setManual((m) => ({ ...m, date: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" style={{ borderColor: BORDER }} />
+                  <input type="time" value={manual.start} onChange={(e) => setManual((m) => ({ ...m, start: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" style={{ borderColor: BORDER }} />
+                  <input type="time" value={manual.end} onChange={(e) => setManual((m) => ({ ...m, end: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" style={{ borderColor: BORDER }} />
+                </div>
+                <input placeholder="note" value={manual.note} onChange={(e) => setManual((m) => ({ ...m, note: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" style={{ borderColor: BORDER }} />
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    if (!manual.date || !manual.start || !manual.end) return alert("fill date/start/end");
+                    const startISO = new Date(`${manual.date}T${manual.start}`).toISOString();
+                    const endISO = new Date(`${manual.date}T${manual.end}`).toISOString();
+                    const ok = await handleAddManualSession(selectedCategory, startISO, endISO, manual.note);
+                    if (!ok) return alert("invalid times");
+                    setManual({ date: "", start: "", end: "", note: "" });
+                  }} className="px-3 py-2 rounded-lg bg-[rgba(107,33,168,0.95)] text-white font-semibold">Add</button>
+                  <button onClick={() => setManual({ date: "", start: "", end: "", note: "" })} className="px-3 py-2 rounded-lg border" style={{ borderColor: BORDER }}>Clear</button>
+                </div>
+              </div>
+            </details>
+
+            <div className="mt-4 border-t pt-3 text-sm" style={{ borderColor: BORDER }}>
+              <div className="flex items-center justify-between"><div>Total:</div><div className="font-semibold">{formatDuration(stats.totalMs)}</div></div>
+              <div className="flex items-center justify-between mt-1"><div>Avg / day:</div><div className="font-semibold">{stats.avgPerDayH.toFixed(2)} h</div></div>
+              <div className="flex items-center justify-between mt-1"><div>Days tracked:</div><div className="font-semibold">{stats.daysTracked}</div></div>
+            </div>
+          </aside>
+
+          {/* Main */}
+          <main className="md:col-span-2 space-y-6">
+            {page === "dashboard" && (
+              <section className="bg-[rgba(255,255,255,0.02)] backdrop-blur-sm p-6 rounded-2xl shadow-2xl" style={{ border: `1px solid ${BORDER}` }}>
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold">Overview</h2>
+                  <div className="flex items-center gap-4">
+                    <div className="text-sm text-white/80">Global goal: <strong>{data.settings.globalGoalHours || 0} h</strong></div>
+                    {/* moved sessions count near global goal */}
+                    <div className="text-sm text-white/80">Sessions: <strong>{data.sessions.length}</strong></div>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="p-4 rounded-lg" style={{ background: CARD_BG, border: `1px solid ${BORDER}` }}>
+                    <div className="text-sm text-white/80">Total time</div>
+                    <div className="text-2xl font-extrabold">{formatDuration(stats.totalMs)}</div>
+                    <div className="text-xs text-white/60 mt-1">Since first session ({data.sessions.length} sessions)</div>
+                    <div className="mt-3">
+                      <ProgressBar value={stats.totalMs} max={Math.max(stats.totalMs, hoursToMs(data.settings.globalGoalHours || 0))} color="#f59e0b" />
+                      <div className="text-xs mt-2 text-white/60">Progress vs global goal</div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-lg" style={{ background: CARD_BG, border: `1px solid ${BORDER}` }}>
+                    <div className="text-sm text-white/80">Average per day</div>
+                    <div className="text-2xl font-extrabold">{stats.avgPerDayH.toFixed(2)} h</div>
+                    <div className="text-xs text-white/60 mt-1">Based on {stats.daysTracked} days</div>
+                  </div>
+
+                  <div className="p-4 rounded-lg" style={{ background: CARD_BG, border: `1px solid ${BORDER}` }}>
+                    <div className="text-sm text-white/80">To global goal</div>
+                    <div className="text-2xl font-extrabold">{(stats.globalLeftMs / 3600_000).toFixed(2)} h</div>
+                    <div className="text-xs text-white/60 mt-1">Est. days at current pace: {stats.globalEstimatedDays === Infinity ? "—" : stats.globalEstimatedDays + " days"}</div>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-3">Groups (aggregated)</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {stats.groups.map((g) => {
+                      const tone = colorForLeft(g.leftMs, g.goalMs);
+                      const accent =
+                        tone === "green" ? "#10b981" : tone === "accent" ? "#f59e0b" : tone === "red" ? "#ef4444" : "#9ca3af";
+                      return (
+                        <div key={g.id} className="p-4 rounded-xl flex items-center justify-between" style={{ background: "rgba(255,255,255,0.02)", border: `1px solid ${BORDER}` }}>
+                          <div>
+                            <div className="text-sm font-medium">{g.name}</div>
+                            <div className="text-xs text-white/60">{formatDuration(g.totalMs)}</div>
+                            <div className="text-xs mt-2 flex gap-2 items-center">
+                              <SmallBadge tone={tone}>{((g.leftMs || 0) / 3600_000).toFixed(2)}h left</SmallBadge>
+                              <span className="text-white/50"> · est: {g.estimatedDays === Infinity ? "—" : g.estimatedDays + "d"}</span>
+                            </div>
+                          </div>
+                          <div className="w-44">
+                            <ProgressBar value={g.totalMs} max={Math.max(1, g.goalMs)} color={g.color || accent} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-3">Categories (breakdown)</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {stats.categories.map((c) => {
+                      const tone = colorForLeft(c.leftMs, c.goalMs);
+                      return (
+                        <div key={c.id} className="p-4 rounded-xl flex items-center justify-between" style={{ background: "rgba(255,255,255,0.02)", border: `1px solid ${BORDER}` }}>
+                          <div>
+                            <div className="text-sm font-medium">{c.name} <span className="text-xs text-white/50">({data.groups.find(g => g.id === c.groupId)?.name || ''})</span></div>
+                            <div className="text-xs text-white/60">{formatDuration(c.totalMs)}</div>
+                            <div className="text-xs mt-2 flex gap-2 items-center">
+                              <SmallBadge tone={tone}>{(c.leftMs / 3600_000).toFixed(2)}h left</SmallBadge>
+                              <span className="text-white/50"> · est: {c.estimatedDays === Infinity ? "—" : c.estimatedDays + "d"}</span>
+                            </div>
+                          </div>
+                          <div className="w-44">
+                            <ProgressBar value={c.totalMs} max={Math.max(1, c.goalMs)} color={c.color || ACCENT_SOFT} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {page === "sessions" && (
+              <section className="bg-[rgba(255,255,255,0.02)] p-6 rounded-2xl shadow-2xl" style={{ border: `1px solid ${BORDER}` }}>
+                <h2 className="text-xl font-bold mb-4">All sessions</h2>
+                <div className="flex flex-col gap-3">
+                  {data.sessions.map((s) => (
+                    <div key={s.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-[rgba(255,255,255,0.01)] transition-colors">
+                      <div>
+                        <div className="text-sm font-semibold">
+                          {data.categories.find((c) => c.id === s.categoryId)?.name}{" "}
+                          <span className="text-xs text-white/60">({groupNameForCategory(s.categoryId)})</span>
+                        </div>
+                        <div className="text-xs text-white/50">{new Date(s.startISO).toLocaleString()} — {new Date(s.endISO).toLocaleString()}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-medium">{formatDuration(s.durationMs)}</div>
+                        <div className="flex gap-2 mt-2 justify-end">
+                          <button className="text-sm px-3 py-1 rounded-lg border" style={{ borderColor: BORDER }} onClick={() => setEditingSession(s)}>Edit</button>
+                          <button className="text-sm px-3 py-1 rounded-lg border border-rose-500 text-rose-400" onClick={() => handleDeleteSession(s.id)}>Delete</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <AnimatePresence>
+                  {editingSession && (
+                    <div className="fixed inset-0 flex items-center justify-center z-50">
+                      <div className="absolute inset-0 bg-black/60" />
+                      <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="bg-[#071226] p-6 rounded-xl w-full max-w-lg relative z-10" style={{ border: `1px solid ${BORDER}` }}>
+                        <h3 className="font-semibold mb-3">Edit session</h3>
+
+                        <label className="block text-xs text-white/70">Category</label>
+                        <CustomSelect
+                          options={data.categories.map((c) => ({ value: c.id, label: c.name, color: c.color }))}
+                          value={editingSession.categoryId}
+                          onChange={(v) => setEditingSession((s) => ({ ...s, categoryId: v }))}
+                          className="w-full mb-3"
+                        />
+
+                        <label className="block text-xs text-white/70">Start</label>
+                        <input type="datetime-local" value={editingSession.startISO.slice(0, 16)} onChange={(e) => {
+                          const newStart = new Date(e.target.value).toISOString();
+                          setEditingSession((s) => ({ ...s, startISO: newStart, durationMs: new Date(s.endISO) - new Date(newStart) }));
+                        }} className="w-full bg-transparent border rounded px-3 py-2 mb-3" style={{ borderColor: BORDER }} />
+
+                        <label className="block text-xs text-white/70">End</label>
+                        <input type="datetime-local" value={editingSession.endISO.slice(0, 16)} onChange={(e) => {
+                          const newEnd = new Date(e.target.value).toISOString();
+                          setEditingSession((s) => ({ ...s, endISO: newEnd, durationMs: new Date(newEnd) - new Date(s.startISO) }));
+                        }} className="w-full bg-transparent border rounded px-3 py-2 mb-3" style={{ borderColor: BORDER }} />
+
+                        <label className="block text-xs text-white/70">Note</label>
+                        <input value={editingSession.note || ""} onChange={(e) => setEditingSession((s) => ({ ...s, note: e.target.value }))} className="w-full bg-transparent border rounded px-3 py-2 mb-4" style={{ borderColor: BORDER }} />
+
+                        <div className="flex gap-3 justify-end">
+                          <button onClick={() => setEditingSession(null)} className="px-4 py-2 rounded-lg border" style={{ borderColor: BORDER }}>Cancel</button>
+                          <button onClick={async () => { await handleSaveEditedSession(editingSession); }} className="px-4 py-2 rounded-lg" style={{ background: ACCENT, color: "white" }}>Save</button>
+                        </div>
+                      </motion.div>
+                    </div>
+                  )}
+                </AnimatePresence>
+              </section>
+            )}
+
+            {page === "charts" && (
+              <section className="bg-[rgba(255,255,255,0.02)] p-6 rounded-2xl shadow-2xl" style={{ border: `1px solid ${BORDER}` }}>
+                <h2 className="text-xl font-bold mb-4">Charts</h2>
+
+                <div className="flex gap-3 items-center mb-4">
+                  <div className="text-sm text-white/80">View:</div>
+                  <div className="flex gap-2">
+                    <ChartToggle active={chartMode === "category"} onClick={() => setChartMode("category")}>By category</ChartToggle>
+                    <ChartToggle active={chartMode === "group"} onClick={() => setChartMode("group")}>By group</ChartToggle>
+                    <ChartToggle active={chartMode === "custom"} onClick={() => setChartMode("custom")}>Custom merge</ChartToggle>
+                  </div>
+                </div>
+
+                {chartMode === "custom" && (
+                  <div className="mb-4 p-3 rounded-lg" style={{ background: CARD_BG, border: `1px solid ${BORDER}` }}>
+                    <div className="text-xs text-white/70 mb-2">Select categories to temporarily aggregate (this does not modify data).</div>
+                    <div className="flex flex-wrap gap-2">
+                      {data.categories.map((c) => (
+                        <button key={c.id} onClick={() => setCustomMerge((prev) => prev.includes(c.id) ? prev.filter(x => x !== c.id) : [...prev, c.id])} className={`px-3 py-1 rounded-full text-sm ${customMerge.includes(c.id) ? 'bg-[rgba(107,33,168,0.95)] text-white' : 'bg-[rgba(255,255,255,0.02)] text-white/80'}`}>
+                          {c.name}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-3 text-sm">Custom total: <strong>{formatDuration(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0))}</strong></div>
+                  </div>
+                )}
+
+                <div style={{ height: 280 }} className="mb-6 rounded-lg overflow-hidden" >
+                  <ResponsiveContainer>
+                    <LineChart data={stats.series.map((d) => ({ date: d.date.slice(5), hours: +(msToHours(d.ms).toFixed(2)) }))}>
+                      <XAxis dataKey="date" stroke="#cbd5e1" />
+                      <YAxis stroke="#cbd5e1" />
+                      <Tooltip />
+                      <Line type="monotone" dataKey="hours" stroke={ACCENT_SOFT} strokeWidth={3} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div style={{ height: 260 }}>
+                  <ResponsiveContainer>
+                    <PieChart>
+                      <Pie
+                        data={
+                          chartMode === "group"
+                            ? stats.groups.map((g) => ({ name: g.name, value: +(msToHours(g.totalMs).toFixed(3)), color: g.color }))
+                            : chartMode === "custom"
+                              ? [{ name: 'Custom', value: +(msToHours(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0)).toFixed(3)), color: ACCENT_SOFT }, ...stats.categories.filter(c => !customMerge.includes(c.id)).map(c => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))]
+                              : stats.categories.map((c) => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))
+                        }
+                        dataKey="value"
+                        nameKey="name"
+                        outerRadius={90}
+                      >
+                        {(chartMode === 'group' ? stats.groups : chartMode === 'custom' ? [{ name: 'Custom' }, ...stats.categories.filter(c => !customMerge.includes(c.id))] : stats.categories).map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color || `hsl(${index * 60},70%,50%)`} />
+                        ))}
+                      </Pie>
+                      <Legend />
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </section>
+            )}
+
+            {page === "settings" && (
+              <section className="bg-[rgba(255,255,255,0.02)] p-6 rounded-2xl shadow-2xl" style={{ border: `1px solid ${BORDER}` }}>
+                <h2 className="text-xl font-bold mb-3">Settings: groups & categories</h2>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs text-white/70">Global goal (hours)</label>
+                    <input type="number" value={data.settings.globalGoalHours || 0} onChange={(e) => handleUpdateSettings({ ...data.settings, globalGoalHours: Number(e.target.value) })} className="w-full rounded px-3 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+                    <div className="text-xs text-white/60 mt-1">Set a global target — dashboard will show time left & estimated days.</div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-white/70">New category (choose group)</label>
+                    <AddCategory onAdd={handleAddCategory} groups={data.groups} />
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <h3 className="font-semibold mb-2">Edit categories (assign to group)</h3>
+                  <div className="flex flex-col gap-2">
+                    {data.categories.map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 p-2 rounded" style={{ background: "rgba(255,255,255,0.01)", border: `1px solid ${BORDER}` }}>
+                        <input value={c.name} onChange={(e) => handleUpdateCategory({ ...c, name: e.target.value })} className="flex-1 rounded px-2 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+                        <CustomSelect options={data.groups.map(g => ({ value: g.id, label: g.name }))} value={c.groupId} onChange={(v) => handleUpdateCategory({ ...c, groupId: v })} className="w-36" />
+                        <input type="number" value={c.goalHours || 0} onChange={(e) => handleUpdateCategory({ ...c, goalHours: Number(e.target.value) })} className="w-24 rounded px-2 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+                        <input type="color" value={c.color || "#10b981"} onChange={(e) => handleUpdateCategory({ ...c, color: e.target.value })} className="w-12 h-8 rounded" />
+                        {c.id !== DEFAULT_CATEGORY && (
+                          <button className="px-2 py-1 text-rose-400 border rounded" style={{ borderColor: "rgba(239,68,68,0.2)" }} onClick={() => handleDeleteCategory(c.id)}>🗑</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-2">Manage groups</h3>
+                  <div className="flex flex-col gap-2">
+                    {data.groups.map((g) => (
+                      <div key={g.id} className="flex items-center gap-2 p-2 rounded" style={{ background: "rgba(255,255,255,0.01)", border: `1px solid ${BORDER}` }}>
+                        <input value={g.name} onChange={(e) => handleUpdateGroup({ ...g, name: e.target.value })} className="flex-1 rounded px-2 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+                        <input type="number" value={g.goalHours || 0} onChange={(e) => handleUpdateGroup({ ...g, goalHours: Number(e.target.value) })} className="w-24 rounded px-2 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+                        <input type="color" value={g.color || "#60a5fa"} onChange={(e) => handleUpdateGroup({ ...g, color: e.target.value })} className="w-12 h-8 rounded" />
+                        {g.id !== DEFAULT_GROUP && <button onClick={() => handleDeleteGroup(g.id)} className="px-3 py-1 rounded border" style={{ borderColor: BORDER }}>Delete</button>}
+                      </div>
+                    ))}
+                    <div className="mt-2">
+                      <button onClick={() => handleAddGroup('New group')} className="px-3 py-2 rounded-lg" style={{ background: ACCENT, color: "white" }}>Add group</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 text-sm text-white/60">Tip: groups are for aggregation & statistics. Deleting moves categories to Ungrouped. Use editing to correct mistakes — nothing is lost without explicit delete.</div>
+              </section>
+            )}
+          </main>
+        </div>
+
+        <footer className="text-xs text-white/60 mt-6 text-center">Single-file • IndexedDB (Dexie) • Full controls • Undo for deletes</footer>
+
+        <div className="fixed bottom-6 right-6 z-50">
+          <AnimatePresence>
+            {undo && (
+              <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="p-3 rounded-xl shadow-lg flex items-center gap-3" style={{ background: "linear-gradient(180deg,#0b1520,#031018)", border: `1px solid ${BORDER}` }}>
+                <div>
+                  <div className="text-sm font-medium">Action removed</div>
+                  <div className="text-xs text-white/60">{undo.type}</div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => performUndo()} className="px-3 py-1 rounded" style={{ background: ACCENT, color: "white" }}>Undo</button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------- Small components -------------------- */
+function NavButton({ children, onClick, active }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-4 py-2 rounded-full font-semibold transition-all`}
+      style={{
+        background: active ? "rgba(255,255,255,0.95)" : MUTED_BG,
+        color: active ? "black" : "white",
+        boxShadow: active ? "0 8px 30px rgba(0,0,0,0.5)" : "none",
+        border: `1px solid ${BORDER}`,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ChartToggle({ children, onClick, active }) {
+  return (
+    <button onClick={onClick} className={`px-3 py-1 rounded-full text-sm`} style={{ background: active ? "rgba(255,255,255,0.04)" : "transparent", border: `1px solid ${BORDER}` }}>
+      {children}
+    </button>
+  );
+}
+
+/* -------------------- Add Category UI -------------------- */
+function AddCategory({ onAdd, groups = [] }) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState("#10b981");
+  const [groupId, setGroupId] = useState(groups[0] ? groups[0].id : DEFAULT_GROUP);
+
+  useEffect(() => {
+    if (groups && groups[0]) setGroupId(groups[0].id);
+  }, [groups]);
+
+  return (
+    <div className="flex gap-2 items-center">
+      <input placeholder="Category name" value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded px-3 py-2 bg-transparent border" style={{ borderColor: BORDER }} />
+      <CustomSelect options={groups.map(g => ({ value: g.id, label: g.name }))} value={groupId} onChange={(v) => setGroupId(v)} className="w-36" />
+      <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="w-12 h-8 rounded" />
+      <button onClick={() => { if (!name) return alert('enter name'); onAdd(name, color, groupId); setName(''); }} className="px-3 py-2 rounded-lg" style={{ background: ACCENT, color: "white" }}>Add</button>
+    </div>
+  );
+}

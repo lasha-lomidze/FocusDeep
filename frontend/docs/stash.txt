@@ -1,0 +1,824 @@
+/* TimersApp.jsx
+   Single-file React component.
+   Needs: react, recharts, framer-motion, tailwind (optional)
+*/
+
+// import React, { useEffect, useMemo, useState } from "react";
+// import {
+//   LineChart,
+//   Line,
+//   XAxis,
+//   YAxis,
+//   Tooltip,
+//   ResponsiveContainer,
+//   PieChart,
+//   Pie,
+//   Cell,
+//   Legend,
+// } from "recharts";
+// import { motion, AnimatePresence } from "framer-motion";
+// import { migrateLocalStorageToDexie } from "./db/migrate";
+
+// /* -------------------- Helpers -------------------- */
+// const STORAGE_KEY = "timersApp:v1_full_remake";
+// const nowISO = () => new Date().toISOString();
+// const msToHours = (ms) => ms / 3600_000;
+// const hoursToMs = (h) => h * 3600_000;
+// const formatDuration = (ms) => {
+//   if (!ms || ms <= 0) ms = 0;
+//   const totalSec = Math.round(ms / 1000);
+//   const h = Math.floor(totalSec / 3600);
+//   const m = Math.floor((totalSec % 3600) / 60);
+//   const s = totalSec % 60;
+//   return `${h}h ${String(m).padStart(2, "0")}m ${String(s).padStart(2, "0")}s`;
+// };
+// // friendly short
+// const formatHours = (ms) => `${msToHours(ms).toFixed(2)}h`;
+
+// // uuid helper (prefer crypto.randomUUID)
+// const uid = () => (typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2, 9));
+
+// /* -------------------- Defaults -------------------- */
+// const DEFAULT_GROUP = "ungrouped";
+// const DEFAULT_CATEGORY = "general";
+
+// const defaultState = {
+//   groups: [{ id: DEFAULT_GROUP, name: "Ungrouped", color: "#94a3b8", goalHours: 0 }],
+//   categories: [{ id: DEFAULT_CATEGORY, name: "General", color: "#4f46e5", goalHours: 0, groupId: DEFAULT_GROUP }],
+//   sessions: [], // {id, categoryId, startISO, endISO, durationMs, note}
+//   running: null, // {id, categoryId, startISO}
+//   settings: { globalGoalHours: 0 },
+// };
+
+// /* -------------------- Small UI primitives -------------------- */
+// function ProgressBar({ value, max = 100, color = "#4f46e5", className = "", height = 8 }) {
+//   const pct = max <= 0 ? 0 : Math.min(100, Math.round((value / max) * 100));
+//   return (
+//     <div className={`w-full bg-gray-200 rounded ${className}`} style={{ height }}>
+//       <div
+//         className="h-full rounded transition-all"
+//         style={{
+//           width: `${pct}%`,
+//           background: color,
+//         }}
+//       />
+//     </div>
+//   );
+// }
+
+
+// function SmallBadge({ children, color = "gray" }) {
+//   const bg = {
+//     gray: "bg-gray-100 text-gray-700",
+//     green: "bg-green-100 text-green-800",
+//     red: "bg-red-100 text-red-800",
+//     blue: "bg-blue-100 text-blue-800",
+//   }[color] || "bg-gray-100 text-gray-700";
+//   return <span className={`px-2 py-0.5 rounded text-xs font-medium ${bg}`}>{children}</span>;
+// }
+
+// /* -------------------- Main Component -------------------- */
+// export default function App() {
+//   // load + migrate
+//   const [data, setData] = useState(() => {
+//     try {
+//       const raw = localStorage.getItem(STORAGE_KEY);
+//       if (!raw) return defaultState;
+//       const parsed = JSON.parse(raw);
+//       // migrate if no groups
+//       if (!parsed.groups) {
+//         const groups = [{ id: DEFAULT_GROUP, name: "Ungrouped", color: "#94a3b8", goalHours: 0 }];
+//         const categories = (parsed.categories || defaultState.categories).map((c) => ({ ...c, groupId: c.groupId || DEFAULT_GROUP }));
+//         return { ...defaultState, ...parsed, groups, categories };
+//       }
+//       return parsed;
+//     } catch (e) {
+//       console.error("read storage", e);
+//       return defaultState;
+//     }
+//   });
+
+//   // live-now for running timer (force re-render each second while running)
+//   const [nowMs, setNowMs] = useState(Date.now());
+//   useEffect(() => {
+//     if (!data.running) return;
+//     const interval = setInterval(() => setNowMs(Date.now()), 1000);
+//     return () => clearInterval(interval);
+//   }, [data.running]);
+
+//   // UI state
+//   const [page, setPage] = useState("dashboard"); // dashboard | sessions | charts | settings
+//   const [selectedCategory, setSelectedCategory] = useState(() => (data.categories[0] ? data.categories[0].id : DEFAULT_CATEGORY));
+//   const [editingSession, setEditingSession] = useState(null);
+//   const [manual, setManual] = useState({ date: "", start: "", end: "", note: "" });
+//   const [chartMode, setChartMode] = useState("category"); // category | group | custom
+//   const [customMerge, setCustomMerge] = useState([]); // category ids
+//   const [undo, setUndo] = useState(null); // {type, payload, expireAt}
+
+
+//   // persist
+//   useEffect(() => {
+//     try {
+//       localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
+//     } catch (e) {
+//       console.error("write storage", e);
+//     }
+//   }, [data]);
+
+//   /* -------------------- CORE ACTIONS -------------------- */
+
+//   // start timer (single running)
+//   function startTimer(catId) {
+//     if (data.running) return;
+//     const run = { id: uid(), categoryId: catId, startISO: nowISO() };
+//     setData((d) => ({ ...d, running: run }));
+//   }
+
+//   function changeRunningCategory(newCatId) {
+//     // allow changing running category on-the-fly
+//     if (!data.running) return;
+//     setData((d) => ({ ...d, running: { ...d.running, categoryId: newCatId } }));
+//   }
+
+//   function stopTimer(note = "") {
+//     const r = data.running;
+//     if (!r) return;
+//     const endISO = nowISO();
+//     const durationMs = new Date(endISO) - new Date(r.startISO);
+//     const session = {
+//       id: uid(),
+//       categoryId: r.categoryId,
+//       startISO: r.startISO,
+//       endISO,
+//       durationMs,
+//       note,
+//     };
+//     setData((d) => ({ ...d, running: null, sessions: [session, ...d.sessions] }));
+//   }
+
+//   function addManualSession(catId, startISO, endISO, note = "") {
+//     const durationMs = new Date(endISO) - new Date(startISO);
+//     if (durationMs <= 0) return false;
+//     const session = { id: uid(), categoryId: catId, startISO, endISO, durationMs, note };
+//     setData((d) => ({ ...d, sessions: [session, ...d.sessions] }));
+//     return true;
+//   }
+
+//   function saveEditedSession(session) {
+//     setData((d) => ({ ...d, sessions: d.sessions.map((s) => (s.id === session.id ? session : s)) }));
+//     setEditingSession(null);
+//   }
+
+//   function deleteSession(id) {
+//     // set undo payload
+//     const session = data.sessions.find((s) => s.id === id);
+//     if (!session) return;
+//     setData((d) => ({ ...d, sessions: d.sessions.filter((s) => s.id !== id) }));
+//     startUndo({ type: "deleteSession", payload: session });
+//   }
+
+//   /* -------------------- CATEGORY / GROUP CRUD (safe) -------------------- */
+
+//   function addCategory(name, color = "#10b981", groupId = DEFAULT_GROUP) {
+//     const cat = { id: uid(), name, color, goalHours: 0, groupId };
+//     setData((d) => ({ ...d, categories: [cat, ...d.categories] }));
+//     setSelectedCategory(cat.id);
+//     return cat.id;
+//   }
+
+//   function updateCategory(cat) {
+//     setData((d) => ({ ...d, categories: d.categories.map((c) => (c.id === cat.id ? cat : c)) }));
+//   }
+
+//   function deleteCategory(catId) {
+//     if (catId === DEFAULT_CATEGORY) return alert("Cannot delete the default category.");
+//     const cat = data.categories.find((c) => c.id === catId);
+//     if (!cat) return;
+//     // move related sessions to default category
+//     setData((d) => ({
+//       ...d,
+//       categories: d.categories.filter((c) => c.id !== catId),
+//       sessions: d.sessions.map((s) => (s.categoryId === catId ? { ...s, categoryId: DEFAULT_CATEGORY } : s)),
+//     }));
+//     startUndo({ type: "deleteCategory", payload: cat });
+//   }
+
+//   function addGroup(name = "New group", color = "#60a5fa") {
+//     const g = { id: uid(), name, color, goalHours: 0 };
+//     setData((d) => ({ ...d, groups: [g, ...d.groups] }));
+//     return g.id;
+//   }
+
+//   function updateGroup(g) {
+//     setData((d) => ({ ...d, groups: d.groups.map((x) => (x.id === g.id ? g : x)) }));
+//   }
+
+//   function deleteGroup(groupId) {
+//     if (groupId === DEFAULT_GROUP) return alert("Cannot delete default group.");
+//     const g = data.groups.find((x) => x.id === groupId);
+//     if (!g) return;
+//     setData((d) => ({
+//       ...d,
+//       groups: d.groups.filter((x) => x.id !== groupId),
+//       categories: d.categories.map((c) => (c.groupId === groupId ? { ...c, groupId: DEFAULT_GROUP } : c)),
+//     }));
+//     startUndo({ type: "deleteGroup", payload: g });
+//   }
+
+//   /* -------------------- UNDO -------------------- */
+
+//   function startUndo(payload) {
+//     // payload: {type, payload}
+//     const expireAt = Date.now() + 9000; // 9s to undo
+//     setUndo({ ...payload, expireAt });
+//     // auto clear
+//     setTimeout(() => {
+//       setUndo((u) => (u && u.expireAt === expireAt ? null : u));
+//     }, 9200);
+//   }
+
+//   function performUndo() {
+//     if (!undo) return;
+//     const u = undo;
+//     if (u.type === "deleteSession") {
+//       setData((d) => ({ ...d, sessions: [u.payload, ...d.sessions] }));
+//     } else if (u.type === "deleteCategory") {
+//       setData((d) => ({ ...d, categories: [u.payload, ...d.categories] }));
+//     } else if (u.type === "deleteGroup") {
+//       setData((d) => ({ ...d, groups: [u.payload, ...d.groups] }));
+//     }
+//     setUndo(null);
+//   }
+
+//   /* -------------------- STATS + ANALYSIS -------------------- */
+
+//   const stats = useMemo(() => {
+//     const sessions = data.sessions;
+//     const runningMs = data.running ? new Date() - new Date(data.running.startISO) : 0;
+//     const totalMs = sessions.reduce((s, x) => s + (x.durationMs || 0), 0) + runningMs;
+
+//     // totals per category
+//     const byCat = {};
+//     for (const c of data.categories) byCat[c.id] = 0;
+//     for (const s of sessions) byCat[s.categoryId] = (byCat[s.categoryId] || 0) + (s.durationMs || 0);
+//     if (data.running) byCat[data.running.categoryId] = (byCat[data.running.categoryId] || 0) + runningMs;
+
+//     // totals per group
+//     const byGroup = {};
+//     for (const g of data.groups) byGroup[g.id] = 0;
+//     for (const c of data.categories) {
+//       byGroup[c.groupId] = (byGroup[c.groupId] || 0) + (byCat[c.id] || 0);
+//     }
+
+//     // daily totals map (YYYY-MM-DD -> ms)
+//     const dayMap = {};
+//     for (const s of sessions) {
+//       const d = new Date(s.startISO).toISOString().slice(0, 10);
+//       dayMap[d] = (dayMap[d] || 0) + (s.durationMs || 0);
+//     }
+//     if (data.running) {
+//       const d = new Date(data.running.startISO).toISOString().slice(0, 10);
+//       dayMap[d] = (dayMap[d] || 0) + runningMs;
+//     }
+
+//     // days tracked: from first session date to today (inclusive) OR unique days count (choose inclusive)
+//     const firstDate = sessions.length ? new Date(sessions[sessions.length - 1].startISO) : null; // sessions added newest-first, but safe guard
+//     const uniqueDays = Object.keys(dayMap).length || 1;
+//     // average per day based on unique days with activity:
+//     const avgPerDayMs = Object.values(dayMap).reduce((a, b) => a + b, 0) / uniqueDays;
+
+//     // per-category objects with leftMs and estimates
+//     const catObjs = data.categories.map((c) => {
+//       const total = byCat[c.id] || 0;
+//       const goalMs = hoursToMs(c.goalHours || 0);
+//       const leftMs = Math.max(0, goalMs - total);
+//       // estimate days to complete based on avg per day for this category (avgCategoryDay)
+//       // compute avg per active day for this category
+//       let catDayMap = {};
+//       for (const s of sessions.filter((x) => x.categoryId === c.id)) {
+//         const d = new Date(s.startISO).toISOString().slice(0, 10);
+//         catDayMap[d] = (catDayMap[d] || 0) + s.durationMs;
+//       }
+//       const catDays = Object.keys(catDayMap).length || 0;
+//       const avgCatPerDayMs = catDays ? Object.values(catDayMap).reduce((a, b) => a + b, 0) / catDays : 0;
+//       const estimatedDays = avgCatPerDayMs > 0 ? Math.ceil(leftMs / avgCatPerDayMs) : Infinity;
+//       return { ...c, totalMs: total, leftMs, goalMs, avgCatPerDayMs, estimatedDays };
+//     });
+
+//     // per-group objects
+//     const groupObjs = data.groups.map((g) => {
+//       const total = byGroup[g.id] || 0;
+//       const goalMs = hoursToMs(g.goalHours || 0);
+//       const leftMs = Math.max(0, goalMs - total);
+//       // compute avg per day for this group's categories combined
+//       let groupDayMap = {};
+//       for (const s of sessions.filter((x) => {
+//         const cat = data.categories.find((c) => c.id === x.categoryId);
+//         return cat && cat.groupId === g.id;
+//       })) {
+//         const d = new Date(s.startISO).toISOString().slice(0, 10);
+//         groupDayMap[d] = (groupDayMap[d] || 0) + s.durationMs;
+//       }
+//       const gDays = Object.keys(groupDayMap).length || 0;
+//       const avgGroupPerDayMs = gDays ? Object.values(groupDayMap).reduce((a, b) => a + b, 0) / gDays : 0;
+//       const estimatedDays = avgGroupPerDayMs > 0 ? Math.ceil(leftMs / avgGroupPerDayMs) : Infinity;
+//       return { ...g, totalMs: total, leftMs, goalMs, avgGroupPerDayMs, estimatedDays };
+//     });
+
+//     // global estimate: use avgPerDayMs across all days with activity
+//     const avgPerDayH = msToHours(avgPerDayMs);
+//     const globalGoalMs = hoursToMs(data.settings.globalGoalHours || 0);
+//     const globalLeftMs = Math.max(0, globalGoalMs - (totalMs || 0));
+//     const globalEstimatedDays = avgPerDayMs > 0 ? Math.ceil(globalLeftMs / avgPerDayMs) : Infinity;
+
+//     // last 30 days series (for charts)
+//     const today = new Date();
+//     const series = [];
+//     for (let i = 29; i >= 0; i--) {
+//       const d = new Date(today.getFullYear(), today.getMonth(), today.getDate() - i);
+//       const key = d.toISOString().slice(0, 10);
+//       series.push({ date: key, ms: dayMap[key] || 0 });
+//     }
+
+//     // weekly / monthly aggregates
+//     const weekly = {}; // ISO week key -> ms
+//     const monthly = {}; // YYYY-MM -> ms
+//     for (const [day, ms] of Object.entries(dayMap)) {
+//       const date = new Date(day);
+//       // week: use year + week number (simple calc)
+//       const tmp = new Date(date.getTime());
+//       tmp.setHours(0, 0, 0, 0);
+//       // get monday as week start
+//       const dayOfWeek = (tmp.getUTCDay() + 6) % 7; // Monday=0
+//       const monday = new Date(tmp.getTime() - dayOfWeek * 24 * 3600 * 1000);
+//       const weekKey = monday.toISOString().slice(0, 10);
+//       weekly[weekKey] = (weekly[weekKey] || 0) + ms;
+//       const monthKey = date.toISOString().slice(0, 7);
+//       monthly[monthKey] = (monthly[monthKey] || 0) + ms;
+//     }
+
+//     return {
+//       totalMs,
+//       totalHours: msToHours(totalMs),
+//       avgPerDayMs,
+//       avgPerDayH,
+//       daysTracked: Object.keys(dayMap).length || 1,
+//       categories: catObjs,
+//       groups: groupObjs,
+//       series,
+//       globalGoalMs,
+//       globalLeftMs,
+//       globalEstimatedDays,
+//       weekly,
+//       monthly,
+//     };
+//   }, [data, customMerge]);
+
+//   /* -------------------- UI Helpers -------------------- */
+//   function groupNameForCategory(catId) {
+//     const cat = data.categories.find((c) => c.id === catId);
+//     if (!cat) return "";
+//     const g = data.groups.find((x) => x.id === cat.groupId);
+//     return g ? g.name : "";
+//   }
+
+//   function colorForLeft(leftMs, goalMs) {
+//     if (goalMs === 0) return "gray";
+//     const progress = 1 - leftMs / goalMs;
+//     if (progress >= 1) return "green";
+//     if (progress >= 0.6) return "blue";
+//     if (progress >= 0.3) return "orange";
+//     return "red";
+//   }
+
+//   // useEffect(() => {
+//   //   migrateLocalStorageToDexie();
+//   // }, []);
+
+//   /* -------------------- RENDER -------------------- */
+//   return (
+//     <div className="min-h-screen bg-gray-50 p-6 font-sans text-gray-800">
+//       <div className="max-w-6xl mx-auto">
+//         <header className="flex items-center justify-between mb-6">
+//           <div>
+//             <h1 className="text-2xl font-semibold">Timers • Deep Analysis</h1>
+//             <div className="text-xs text-gray-500">Control, correct, and see exactly how much time you need to hit goals.</div>
+//           </div>
+
+//           <nav className="flex gap-2">
+//             <NavButton active={page === "dashboard"} onClick={() => setPage("dashboard")}>Dashboard</NavButton>
+//             <NavButton active={page === "sessions"} onClick={() => setPage("sessions")}>Sessions</NavButton>
+//             <NavButton active={page === "charts"} onClick={() => setPage("charts")}>Charts</NavButton>
+//             <NavButton active={page === "settings"} onClick={() => setPage("settings")}>Settings</NavButton>
+//           </nav>
+//         </header>
+
+//         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+//           {/* Left: quick timer */}
+//           <aside className="md:col-span-1 bg-white p-4 rounded-lg shadow-sm">
+//             <h2 className="font-medium mb-2">Quick timer</h2>
+//             <div className="flex flex-wrap gap-2 mb-3">
+//               {data.categories.map((c) => (
+//                 <button key={c.id} onClick={() => setSelectedCategory(c.id)} className="flex items-center gap-2 px-3 py-1 rounded-2xl text-sm font-medium shadow-sm focus:outline-none" style={{ background: "rgba(0,0,0,0.03)" }}>
+//                   <span style={{ width: 10, height: 10, background: c.color, borderRadius: 4, display: "inline-block" }} />
+//                   {c.name}
+//                 </button>
+//               ))}
+//             </div>
+
+//             <div className="mb-3">
+//               {data.running ? (
+//                 <div className="flex flex-col gap-2">
+//                   <div className="text-sm text-gray-600">Running: <strong>{data.categories.find((x) => x.id === data.running.categoryId)?.name}</strong> — <span className="italic text-xs">{groupNameForCategory(data.running.categoryId)}</span></div>
+
+//                   <div className="text-lg font-semibold">{formatDuration(nowMs - new Date(data.running.startISO))}</div>
+
+//                   {/* change running category */}
+//                   <div className="flex gap-2 items-center">
+//                     <select value={data.running.categoryId} onChange={(e) => changeRunningCategory(e.target.value)} className="flex-1 border rounded px-2 py-1">
+//                       {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name} ({data.groups.find(g => g.id === c.groupId)?.name || ''})</option>)}
+//                     </select>
+//                     <button onClick={() => stopTimer()} className="px-3 py-1 rounded bg-red-500 text-white">Stop</button>
+//                   </div>
+
+//                   <div className="flex gap-2">
+//                     <button onClick={() => {
+//                       const note = prompt("Note for this session (optional)") || "";
+//                       stopTimer(note);
+//                     }} className="px-3 py-1 rounded border">Stop + note</button>
+//                   </div>
+//                 </div>
+//               ) : (
+//                 <div className="flex gap-2">
+//                   <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="flex-1 border rounded px-2 py-1">
+//                     {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name} ({data.groups.find(g => g.id === c.groupId)?.name || ''})</option>)}
+//                   </select>
+//                   <button onClick={() => startTimer(selectedCategory)} className="px-3 py-1 rounded bg-green-500 text-white">Start</button>
+//                 </div>
+//               )}
+//             </div>
+
+//             <details className="mb-3 bg-gray-50 p-2 rounded">
+//               <summary className="text-sm font-medium">Add manual session</summary>
+//               <div className="mt-2 flex flex-col gap-2">
+//                 <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="border rounded px-2 py-1">
+//                   {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+//                 </select>
+//                 <div className="flex gap-2">
+//                   <input type="date" value={manual.date} onChange={(e) => setManual((m) => ({ ...m, date: e.target.value }))} className="border rounded px-2 py-1" />
+//                   <input type="time" value={manual.start} onChange={(e) => setManual((m) => ({ ...m, start: e.target.value }))} className="border rounded px-2 py-1" />
+//                   <input type="time" value={manual.end} onChange={(e) => setManual((m) => ({ ...m, end: e.target.value }))} className="border rounded px-2 py-1" />
+//                 </div>
+//                 <input placeholder="note" value={manual.note} onChange={(e) => setManual((m) => ({ ...m, note: e.target.value }))} className="border rounded px-2 py-1" />
+//                 <div className="flex gap-2">
+//                   <button onClick={() => {
+//                     console.log(manual)
+//                     if (!manual.date || !manual.start || !manual.end) return alert("fill date/start/end");
+//                     const startISO = new Date(`${manual.date}T${manual.start}`).toISOString();
+//                     const endISO = new Date(`${manual.date}T${manual.end}`).toISOString();
+//                     const ok = addManualSession(selectedCategory, startISO, endISO, manual.note);
+//                     if (!ok) return alert("invalid times");
+//                     setManual({ date: "", start: "", end: "", note: "" });
+//                   }} className="px-3 py-1 rounded bg-blue-600 text-white">Add</button>
+//                   <button onClick={() => setManual({ date: "", start: "", end: "", note: "" })} className="px-3 py-1 rounded border">Clear</button>
+//                 </div>
+//               </div>
+//             </details>
+
+//             <div className="mt-4 border-t pt-3 text-sm">
+//               <div>Total: <strong>{formatDuration(stats.totalMs)}</strong></div>
+//               <div>Avg / day: <strong>{stats.avgPerDayH.toFixed(2)} h</strong></div>
+//               <div>Days tracked: <strong>{stats.daysTracked}</strong></div>
+//             </div>
+//           </aside>
+
+//           {/* Right: main content (spans 2 columns) */}
+//           <main className="md:col-span-2">
+//             {page === "dashboard" && (
+//               <section className="bg-white p-4 rounded-lg shadow-sm mb-6">
+//                 <div className="flex items-center justify-between mb-4">
+//                   <h2 className="text-lg font-medium">Overview</h2>
+//                   <div className="text-sm">Global goal: <strong>{data.settings.globalGoalHours || 0} h</strong></div>
+//                 </div>
+
+//                 <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+//                   <div className="p-3 rounded bg-gray-50">
+//                     <div className="text-sm text-gray-600">Total time</div>
+//                     <div className="text-2xl font-semibold">{formatDuration(stats.totalMs)}</div>
+//                     <div className="text-xs text-gray-500 mt-1">Since first session ({data.sessions.length} sessions)</div>
+//                     <div className="mt-3">
+//                       <ProgressBar value={stats.totalMs} max={Math.max(stats.totalMs, hoursToMs(data.settings.globalGoalHours || 0))} />
+//                       <div className="text-xs mt-1">Progress vs global goal</div>
+//                     </div>
+//                   </div>
+
+//                   <div className="p-3 rounded bg-gray-50">
+//                     <div className="text-sm text-gray-600">Average per day</div>
+//                     <div className="text-2xl font-semibold">{stats.avgPerDayH.toFixed(2)} h</div>
+//                     <div className="text-xs text-gray-500 mt-1">Based on {stats.daysTracked} days</div>
+//                   </div>
+
+//                   <div className="p-3 rounded bg-gray-50">
+//                     <div className="text-sm text-gray-600">To global goal</div>
+//                     <div className="text-2xl font-semibold">{(stats.globalLeftMs / 3600_000).toFixed(2)} h</div>
+//                     <div className="text-xs text-gray-500 mt-1">Est. days at current pace: {stats.globalEstimatedDays === Infinity ? "—" : stats.globalEstimatedDays + " days"}</div>
+//                   </div>
+//                 </div>
+
+//                 <div className="mt-6">
+//                   <h3 className="font-medium mb-2">Groups (aggregated)</h3>
+//                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+//                     {stats.groups.map((g) => {
+//                       const color = colorForLeft(g.leftMs, g.goalMs);
+//                       return (
+//                         <div key={g.id} className="p-3 rounded bg-white shadow-sm flex items-center justify-between">
+//                           <div>
+//                             <div className="text-sm font-medium">{g.name}</div>
+//                             <div className="text-xs text-gray-500">{formatDuration(g.totalMs)}</div>
+//                             <div className="text-xs mt-1 flex gap-1 items-center">
+//                               <SmallBadge color={color}>{((g.leftMs || 0) / 3600_000).toFixed(2)}h left</SmallBadge>
+//                               <span className="text-gray-400"> · est: {g.estimatedDays === Infinity ? "—" : g.estimatedDays + "d"}</span>
+//                             </div>
+//                           </div>
+//                           <div className="w-40">
+//                             <ProgressBar value={g.totalMs} max={Math.max(1, g.goalMs)} color={g.color} />
+//                           </div>
+//                         </div>
+//                       );
+//                     })}
+//                   </div>
+//                 </div>
+
+//                 <div className="mt-6">
+//                   <h3 className="font-medium mb-2">Categories (breakdown)</h3>
+//                   <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+//                     {stats.categories.map((c) => {
+//                       const color = colorForLeft(c.leftMs, c.goalMs);
+//                       return (
+//                         <div key={c.id} className="p-3 rounded bg-white shadow-sm flex items-center justify-between">
+//                           <div>
+//                             <div className="text-sm font-medium">{c.name} <span className="text-xs text-gray-400">({data.groups.find(g => g.id === c.groupId)?.name || ''})</span></div>
+//                             <div className="text-xs text-gray-500">{formatDuration(c.totalMs)}</div>
+//                             <div className="text-xs mt-1 flex gap-1 items-center">
+//                               <SmallBadge color={color}>{(c.leftMs / 3600_000).toFixed(2)}h left</SmallBadge>
+//                               <span className="text-gray-400"> · est: {c.estimatedDays === Infinity ? "—" : c.estimatedDays + "d"}</span>
+//                             </div>
+//                           </div>
+//                           <div className="w-40">
+//                             <ProgressBar value={c.totalMs} max={Math.max(1, c.goalMs)} color={c.color} />
+//                           </div>
+//                         </div>
+//                       );
+//                     })}
+//                   </div>
+//                 </div>
+//               </section>
+//             )}
+
+//             {page === "sessions" && (
+//               <section className="bg-white p-4 rounded-lg shadow-sm">
+//                 <h2 className="text-lg font-medium mb-3">All sessions</h2>
+//                 <div className="flex flex-col gap-2">
+//                   {data.sessions.map((s) => (
+//                     <div key={s.id} className="flex items-center justify-between p-2 rounded hover:bg-gray-50">
+//                       <div>
+//                         <div className="text-sm font-medium">
+//                           {data.categories.find((c) => c.id === s.categoryId)?.name}{" "}
+//                           <span className="text-xs text-gray-400">({groupNameForCategory(s.categoryId)})</span>
+//                         </div>
+//                         <div className="text-xs text-gray-500">{new Date(s.startISO).toLocaleString()} — {new Date(s.endISO).toLocaleString()}</div>
+//                       </div>
+//                       <div className="text-right">
+//                         <div className="font-medium">{formatDuration(s.durationMs)}</div>
+//                         <div className="flex gap-2 mt-2 justify-end">
+//                           <button className="text-sm px-2 py-1 rounded border" onClick={() => setEditingSession(s)}>Edit</button>
+//                           <button className="text-sm px-2 py-1 rounded border" onClick={() => { if (confirm('Delete session?')) deleteSession(s.id) }}>Delete</button>
+//                         </div>
+//                       </div>
+//                     </div>
+//                   ))}
+//                 </div>
+
+//                 {/* Edit modal */}
+//                 <AnimatePresence>
+//                   {editingSession && (
+//                     <div className="fixed inset-0 flex items-center justify-center bg-black/30 z-40">
+//                       <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="bg-white p-4 rounded w-full max-w-md">
+//                         <h3 className="font-medium mb-2">Edit session</h3>
+
+//                         <label className="block text-xs text-gray-600">Category</label>
+//                         <select value={editingSession.categoryId} onChange={(e) => setEditingSession((s) => ({ ...s, categoryId: e.target.value }))} className="w-full border rounded px-2 py-1 mb-2">
+//                           {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+//                         </select>
+
+//                         <label className="block text-xs text-gray-600">Start</label>
+//                         <input type="datetime-local" value={editingSession.startISO.slice(0, 16)} onChange={(e) => {
+//                           const newStart = new Date(e.target.value).toISOString();
+//                           setEditingSession((s) => ({ ...s, startISO: newStart, durationMs: new Date(s.endISO) - new Date(newStart) }));
+//                         }} className="w-full border rounded px-2 py-1 mb-2" />
+
+//                         <label className="block text-xs text-gray-600">End</label>
+//                         <input type="datetime-local" value={editingSession.endISO.slice(0, 16)} onChange={(e) => {
+//                           const newEnd = new Date(e.target.value).toISOString();
+//                           setEditingSession((s) => ({ ...s, endISO: newEnd, durationMs: new Date(newEnd) - new Date(s.startISO) }));
+//                         }} className="w-full border rounded px-2 py-1 mb-2" />
+
+//                         <label className="block text-xs text-gray-600">Note</label>
+//                         <input value={editingSession.note || ""} onChange={(e) => setEditingSession((s) => ({ ...s, note: e.target.value }))} className="w-full border rounded px-2 py-1 mb-3" />
+
+//                         <div className="flex gap-2 justify-end">
+//                           <button onClick={() => setEditingSession(null)} className="px-3 py-1 rounded border">Cancel</button>
+//                           <button onClick={() => saveEditedSession(editingSession)} className="px-3 py-1 rounded bg-blue-600 text-white">Save</button>
+//                         </div>
+//                       </motion.div>
+//                     </div>
+//                   )}
+//                 </AnimatePresence>
+//               </section>
+//             )}
+
+//             {page === "charts" && (
+//               <section className="bg-white p-4 rounded-lg shadow-sm">
+//                 <h2 className="text-lg font-medium mb-3">Charts</h2>
+
+//                 <div className="flex gap-2 items-center mb-3">
+//                   <div className="text-sm">View:</div>
+//                   <div className="flex gap-2">
+//                     <ChartToggle active={chartMode === "category"} onClick={() => setChartMode("category")}>By category</ChartToggle>
+//                     <ChartToggle active={chartMode === "group"} onClick={() => setChartMode("group")}>By group</ChartToggle>
+//                     <ChartToggle active={chartMode === "custom"} onClick={() => setChartMode("custom")}>Custom merge</ChartToggle>
+//                   </div>
+//                 </div>
+
+//                 {chartMode === "custom" && (
+//                   <div className="mb-3 p-2 bg-gray-50 rounded">
+//                     <div className="text-xs text-gray-600 mb-2">Select categories to temporarily aggregate (this does not modify data).</div>
+//                     <div className="flex flex-wrap gap-2">
+//                       {data.categories.map((c) => (
+//                         <button key={c.id} onClick={() => setCustomMerge((prev) => prev.includes(c.id) ? prev.filter(x => x !== c.id) : [...prev, c.id])} className={`px-2 py-1 rounded text-sm ${customMerge.includes(c.id) ? 'bg-blue-600 text-white' : 'bg-white border'}`}>
+//                           {c.name}
+//                         </button>
+//                       ))}
+//                     </div>
+//                     <div className="mt-2 text-sm">Custom total: <strong>{formatDuration(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0))}</strong></div>
+//                   </div>
+//                 )}
+
+//                 <div style={{ height: 260 }} className="mb-4">
+//                   <ResponsiveContainer>
+//                     <LineChart data={stats.series.map((d) => ({ date: d.date.slice(5), hours: +(msToHours(d.ms).toFixed(2)) }))}>
+//                       <XAxis dataKey="date" />
+//                       <YAxis />
+//                       <Tooltip />
+//                       <Line type="monotone" dataKey="hours" stroke="#4f46e5" strokeWidth={2} dot={false} />
+//                     </LineChart>
+//                   </ResponsiveContainer>
+//                 </div>
+
+//                 <div style={{ height: 240 }}>
+//                   <ResponsiveContainer>
+//                     <PieChart>
+//                       <Pie
+//                         data={
+//                           chartMode === "group"
+//                             ? stats.groups.map((g) => ({ name: g.name, value: +(msToHours(g.totalMs).toFixed(3)), color: g.color }))
+//                             : chartMode === "custom"
+//                               ? [{ name: 'Custom', value: +(msToHours(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0)).toFixed(3)), color: '#60a5fa' }, ...stats.categories.filter(c => !customMerge.includes(c.id)).map(c => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))]
+//                               : stats.categories.map((c) => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))
+//                         }
+//                         dataKey="value"
+//                         nameKey="name"
+//                         outerRadius={80}
+//                       >
+//                         {(chartMode === 'group' ? stats.groups : chartMode === 'custom' ? [{ name: 'Custom' }, ...stats.categories.filter(c => !customMerge.includes(c.id))] : stats.categories).map((entry, index) => (
+//                           <Cell key={`cell-${index}`} fill={entry.color || `hsl(${index * 60},70%,50%)`} />
+//                         ))}
+//                       </Pie>
+//                       <Legend />
+//                       <Tooltip />
+//                     </PieChart>
+//                   </ResponsiveContainer>
+//                 </div>
+//               </section>
+//             )}
+
+//             {page === "settings" && (
+//               <section className="bg-white p-4 rounded-lg shadow-sm">
+//                 <h2 className="text-lg font-medium mb-3">Settings: groups & categories</h2>
+
+//                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+//                   <div>
+//                     <label className="block text-xs text-gray-600">Global goal (hours)</label>
+//                     <input type="number" value={data.settings.globalGoalHours || 0} onChange={(e) => setData((d) => ({ ...d, settings: { ...d.settings, globalGoalHours: Number(e.target.value) } }))} className="w-full border rounded px-2 py-1" />
+//                     <div className="text-xs text-gray-500 mt-1">Set a global target — dashboard will show time left & estimated days.</div>
+//                   </div>
+
+//                   <div>
+//                     <label className="block text-xs text-gray-600">New category (choose group)</label>
+//                     <AddCategory onAdd={(name, color, groupId) => addCategory(name, color, groupId)} groups={data.groups} />
+//                   </div>
+//                 </div>
+
+//                 <div className="mt-4">
+//                   <h3 className="font-medium mb-2">Edit categories (assign to group)</h3>
+//                   <div className="flex flex-col gap-2">
+//                     {data.categories.map((c) => (
+//                       <div key={c.id} className="flex items-center gap-2 p-2 rounded bg-gray-50">
+//                         <input value={c.name} onChange={(e) => updateCategory({ ...c, name: e.target.value })} className="flex-1 border rounded px-2 py-1" />
+//                         <select value={c.groupId} onChange={(e) => updateCategory({ ...c, groupId: e.target.value })} className="w-36 border rounded px-2 py-1">
+//                           {data.groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+//                         </select>
+//                         <input type="number" value={c.goalHours || 0} onChange={(e) => updateCategory({ ...c, goalHours: Number(e.target.value) })} className="w-24 border rounded px-2 py-1" />
+//                         <input type="color" value={c.color || "#10b981"} onChange={(e) => updateCategory({ ...c, color: e.target.value })} className="w-12 h-8" />
+//                         {c.id !== DEFAULT_CATEGORY && (
+//                           <button className="px-2 py-1 text-red-600 border rounded" onClick={() => { if (confirm(`Delete category "${c.name}"? Sessions will move to ${data.categories.find(x => x.id === DEFAULT_CATEGORY)?.name || 'General'}.`)) deleteCategory(c.id) }}>🗑</button>
+//                         )}
+//                       </div>
+//                     ))}
+//                   </div>
+//                 </div>
+
+//                 <div className="mt-6">
+//                   <h3 className="font-medium mb-2">Manage groups</h3>
+//                   <div className="flex flex-col gap-2">
+//                     {data.groups.map((g) => (
+//                       <div key={g.id} className="flex items-center gap-2 p-2 rounded bg-gray-50">
+//                         <input value={g.name} onChange={(e) => updateGroup({ ...g, name: e.target.value })} className="flex-1 border rounded px-2 py-1" />
+//                         <input type="number" value={g.goalHours || 0} onChange={(e) => updateGroup({ ...g, goalHours: Number(e.target.value) })} className="w-24 border rounded px-2 py-1" />
+//                         <input type="color" value={g.color || "#60a5fa"} onChange={(e) => updateGroup({ ...g, color: e.target.value })} className="w-12 h-8" />
+//                         {g.id !== DEFAULT_GROUP && <button onClick={() => { if (confirm('Delete group? Its categories will be moved to Ungrouped.')) deleteGroup(g.id) }} className="px-2 py-1 rounded border">Delete</button>}
+//                       </div>
+//                     ))}
+//                     <div className="mt-2">
+//                       <button onClick={() => addGroup('New group')} className="px-3 py-1 rounded bg-blue-600 text-white">Add group</button>
+//                     </div>
+//                   </div>
+//                 </div>
+
+//                 <div className="mt-4 text-sm text-gray-600">Tip: groups are for aggregation & statistics. Deleting moves categories to Ungrouped. Use editing to correct mistakes — nothing is lost without explicit delete.</div>
+//               </section>
+//             )}
+//           </main>
+//         </div>
+
+//         <footer className="text-xs text-gray-500 mt-6">Single-file • LocalStorage • Full controls • Undo for deletes</footer>
+
+//         {/* Undo toast */}
+//         <div className="fixed bottom-6 right-6 z-50">
+//           <AnimatePresence>
+//             {undo && (
+//               <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="bg-white border rounded p-3 shadow flex items-center gap-3">
+//                 <div>
+//                   <div className="text-sm font-medium">Action removed</div>
+//                   <div className="text-xs text-gray-500">{undo.type}</div>
+//                 </div>
+//                 <div className="flex gap-2">
+//                   <button onClick={() => performUndo()} className="px-3 py-1 rounded bg-blue-600 text-white text-sm">Undo</button>
+//                 </div>
+//               </motion.div>
+//             )}
+//           </AnimatePresence>
+//         </div>
+//       </div>
+//     </div>
+//   );
+// }
+
+// /* -------------------- Small components -------------------- */
+// function NavButton({ children, onClick, active }) {
+//   return (
+//     <button onClick={onClick} className={`px-3 py-1 rounded ${active ? "bg-white shadow" : "bg-transparent"}`}>
+//       {children}
+//     </button>
+//   );
+// }
+
+// function ChartToggle({ children, onClick, active }) {
+//   return (
+//     <button onClick={onClick} className={`px-2 py-1 rounded ${active ? "bg-gray-100" : ""}`}>
+//       {children}
+//     </button>
+//   );
+// }
+
+// /* -------------------- Add Category UI -------------------- */
+// function AddCategory({ onAdd, groups = [] }) {
+//   const [name, setName] = useState("");
+//   const [color, setColor] = useState("#10b981");
+//   const [groupId, setGroupId] = useState(groups[0] ? groups[0].id : DEFAULT_GROUP);
+
+//   useEffect(() => {
+//     if (groups && groups[0]) setGroupId(groups[0].id);
+//   }, [groups]);
+
+//   return (
+//     <div className="flex gap-2">
+//       <input placeholder="Category name" value={name} onChange={(e) => setName(e.target.value)} className="flex-1 border rounded px-2 py-1" />
+//       <select value={groupId} onChange={(e) => setGroupId(e.target.value)} className="border rounded px-2 py-1 w-36">
+//         {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+//       </select>
+//       <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="w-12 h-8" />
+//       <button onClick={() => { if (!name) return alert('enter name'); onAdd(name, color, groupId); setName(''); }} className="px-3 py-1 rounded bg-blue-600 text-white">Add</button>
+//     </div>
+//   );
+// }

@@ -1,0 +1,158 @@
+@import 'tailwindcss';
+
+:root {
+    color-scheme: light;
+}
+
+/* hide scrollbar but keep scrolling */
+.no-scrollbar {
+    -ms-overflow-style: none;
+    /* IE + Edge */
+    scrollbar-width: none;
+    /* Firefox */
+}
+
+.no-scrollbar::-webkit-scrollbar {
+    display: none;
+    /* Chrome, Safari */
+}
+
+:root :is(input.bg-gray-50, select.bg-gray-50, textarea.bg-gray-50) {
+    min-height: 2.75rem;
+    line-height: 1.4;
+    transition: background-color 160ms ease, border-color 160ms ease, box-shadow 160ms ease;
+}
+
+:root :is(input, select, textarea, button):focus-visible {
+    outline: 2px solid #818cf8;
+    outline-offset: 2px;
+}
+
+:root[data-theme="dark"] {
+    color-scheme: dark;
+}
+
+:root[data-theme="dark"] .bg-white {
+    background-color: #1c2a3e;
+}
+
+:root[data-theme="dark"] .bg-gray-50 {
+    background-color: #222e41;
+}
+
+:root[data-theme="dark"] .bg-gray-100 {
+    background-color: #111a29;
+}
+
+:root[data-theme="dark"] .bg-gray-200 {
+    background-color: #344258;
+}
+
+:root[data-theme="dark"] .bg-gray-800 {
+    background-color: #263449;
+}
+
+:root[data-theme="dark"] .bg-gray-900 {
+    background-color: #0c1422;
+}
+
+:root[data-theme="dark"] .bg-indigo-50 {
+    background-color: #302d78;
+}
+
+:root[data-theme="dark"] .bg-green-50 {
+    background-color: #14532d;
+}
+
+:root[data-theme="dark"] .text-gray-900 {
+    color: #f9fafb;
+}
+
+:root[data-theme="dark"] .text-gray-800 {
+    color: #e5e7eb;
+}
+
+:root[data-theme="dark"] .text-gray-700 {
+    color: #d1d5db;
+}
+
+:root[data-theme="dark"] .text-gray-600 {
+    color: #cbd5e1;
+}
+
+:root[data-theme="dark"] .text-gray-500,
+:root[data-theme="dark"] .text-gray-400 {
+    color: #aab6c8;
+}
+
+:root[data-theme="dark"] .text-indigo-800 {
+    color: #e0e7ff;
+}
+
+:root[data-theme="dark"] .text-indigo-700 {
+    color: #c7d2fe;
+}
+
+:root[data-theme="dark"] .text-indigo-600 {
+    color: #a5b4fc;
+}
+
+:root[data-theme="dark"] .text-green-800 {
+    color: #dcfce7;
+}
+
+:root[data-theme="dark"] .border-gray-100 {
+    border-color: #2b394e;
+}
+
+:root[data-theme="dark"] .border-gray-200 {
+    border-color: #3b4a60;
+}
+
+:root[data-theme="dark"] .border-gray-300 {
+    border-color: #53627a;
+}
+
+:root[data-theme="dark"] .border-indigo-100 {
+    border-color: #4338ca;
+}
+
+:root[data-theme="dark"] [class~="hover:bg-gray-50"]:hover {
+    background-color: #2b394e;
+}
+
+:root[data-theme="dark"] [class~="hover:bg-gray-100"]:hover {
+    background-color: #344258;
+}
+
+:root[data-theme="dark"] [class~="hover:text-gray-900"]:hover {
+    color: #f9fafb;
+}
+
+:root[data-theme="dark"] :is(input.bg-gray-50, select.bg-gray-50, textarea.bg-gray-50) {
+    background-color: #222f43;
+    border-color: #3b4b63;
+}
+
+:root[data-theme="dark"] :is(input, select, textarea, button):focus-visible {
+    outline-color: #818cf8;
+}
+
+:root[data-theme="dark"] option {
+    background-color: #192436;
+    color: #e5e7eb;
+}
+
+:root[data-theme="dark"] .bg-white.rounded-3xl {
+    border-color: #34445b;
+    box-shadow: 0 12px 28px rgb(0 0 0 / 18%);
+}
+
+:root[data-theme="dark"] .brand-mark {
+    box-shadow: 0 6px 16px rgb(99 102 241 / 28%);
+}
+
+:root[data-theme="dark"] .recharts-default-tooltip {
+    background-color: #192436 !important;
+    border: 1px solid #3b4a60 !important;
+}

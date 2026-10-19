@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Build output
+/frontend/dist/
+/backend/dist/
+coverage/
+
+# Local configuration
+.env
+.env.*
+!.env.example
+
+# Local databases and generated backups
+/backend/data/
+/backend/backups/
+*.db
+*.db-shm
+*.db-wal
+
+# Logs and operating-system files
+*.log
+npm-debug.log*
+.DS_Store
+
+# Editors
+.vscode/*
+!.vscode/extensions.json
+.idea/

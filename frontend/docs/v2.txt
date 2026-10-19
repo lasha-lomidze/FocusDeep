@@ -1,0 +1,663 @@
+import { useEffect, useState } from "react";
+import {
+  LineChart,
+  Line,
+  XAxis,
+  YAxis,
+  Tooltip,
+  ResponsiveContainer,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
+} from "recharts";
+import { motion, AnimatePresence } from "framer-motion";
+import { db } from "./db/db";
+import { formatDuration, msToHours, hoursToMs } from "./utils/helpers";
+import { useDB } from "./db/useDb";
+import { DEFAULT_GROUP, DEFAULT_CATEGORY } from "./utils/const";
+import { calculateStats } from "./utils/stats";
+
+/* -------------------- Small UI primitives -------------------- */
+function ProgressBar({ value, max = 100, color = "#7c3aed", className = "", height = 10 }) {
+  const pct = max <= 0 ? 0 : Math.min(100, Math.round((value / max) * 100));
+  return (
+    <div
+      className={`w-full bg-white/6 rounded-full overflow-hidden ${className}`}
+      style={{ height, boxShadow: "inset 0 1px 2px rgba(0,0,0,0.5)" }}
+    >
+      <div
+        className="h-full transition-all"
+        style={{
+          width: `${pct}%`,
+          background: `linear-gradient(90deg, ${color}, rgba(255,255,255,0.06))`,
+        }}
+      />
+    </div>
+  );
+}
+
+function SmallBadge({ children, color = "gray" }) {
+  const map = {
+    gray: "bg-white/6 text-white/90 ring-1 ring-white/6",
+    green: "bg-emerald-600/90 text-white",
+    red: "bg-rose-600/90 text-white",
+    blue: "bg-sky-500/90 text-white",
+    yellow: "bg-yellow-400 text-black",
+  };
+  const cls = map[color] || map.gray;
+  return <span className={`px-2 py-0.5 rounded text-xs font-semibold ${cls}`}>{children}</span>;
+}
+
+/* -------------------- Main Component -------------------- */
+export default function App() {
+  const {
+    data,
+    loaded,
+    addGroup,
+    updateGroup,
+    deleteGroup,
+    addCategory,
+    updateCategory,
+    deleteCategory,
+    addManualSession,
+    saveEditedSession,
+    deleteSession,
+    startTimer,
+    changeRunningCategory,
+    stopTimer,
+    updateSettings,
+    refreshAll,
+  } = useDB();
+
+  // local UI state
+  const [nowMs, setNowMs] = useState(Date.now());
+  useEffect(() => {
+    if (!loaded) return;
+    if (!data.running) return;
+    const interval = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(interval);
+  }, [data.running, loaded]);
+
+  const [page, setPage] = useState("dashboard");
+  const [selectedCategory, setSelectedCategory] = useState(DEFAULT_CATEGORY);
+  useEffect(() => {
+    if (!loaded) return;
+    setSelectedCategory(data.categories[0] ? data.categories[0].id : DEFAULT_CATEGORY);
+  }, [data.categories, loaded]);
+
+  const [editingSession, setEditingSession] = useState(null);
+  const [manual, setManual] = useState({ date: "", start: "", end: "", note: "" });
+  const [chartMode, setChartMode] = useState("category");
+  const [customMerge, setCustomMerge] = useState([]);
+  const [undo, setUndo] = useState(null); // {type, payload, expireAt}
+
+  /* -------------------- Undo handling -------------------- */
+  function startUndo(payload) {
+    const expireAt = Date.now() + 9000;
+    setUndo({ ...payload, expireAt });
+    setTimeout(() => {
+      setUndo((u) => (u && u.expireAt === expireAt ? null : u));
+    }, 9200);
+  }
+
+  async function performUndo() {
+    if (!undo) return;
+    const u = undo;
+    try {
+      if (u.type === "deleteSession") {
+        // payload is session object
+        await db.sessions.put(u.payload);
+        // refresh local state
+        await refreshAll();
+      } else if (u.type === "deleteCategory") {
+        await db.categories.put(u.payload);
+        await refreshAll();
+      } else if (u.type === "deleteGroup") {
+        await db.groups.put(u.payload);
+        await refreshAll();
+      }
+    } catch (e) {
+      console.error("performUndo", e);
+    }
+    setUndo(null);
+  }
+
+  /* -------------------- Actions wiring (wrap db actions and set undo) -------------------- */
+  const handleStartTimer = async (catId) => {
+    await startTimer(catId);
+  };
+
+  const handleChangeRunningCategory = async (newCatId) => {
+    await changeRunningCategory(newCatId);
+  };
+
+  const handleStopTimer = async (note = "") => {
+    await stopTimer(note);
+  };
+
+  const handleAddManualSession = async (catId, startISO, endISO, note = "") => {
+    const ok = await addManualSession(catId, startISO, endISO, note);
+    return ok;
+  };
+
+  const handleSaveEditedSession = async (session) => {
+    await saveEditedSession(session);
+    setEditingSession(null);
+  };
+
+  const handleDeleteSession = async (id) => {
+    if (!confirm("Delete session?")) return;
+    const payload = await deleteSession(id);
+    if (payload) startUndo({ type: "deleteSession", payload });
+  };
+
+  const handleAddCategory = async (name, color, groupId) => {
+    const id = await addCategory(name, color, groupId);
+    setSelectedCategory(id);
+  };
+
+  const handleUpdateCategory = async (cat) => {
+    await updateCategory(cat);
+  };
+
+  const handleDeleteCategory = async (catId) => {
+    if (!confirm("Delete category? Sessions will move to General.")) return;
+    const payload = await deleteCategory(catId);
+    if (payload) startUndo({ type: "deleteCategory", payload });
+  };
+
+  const handleAddGroup = async (name = "New group") => {
+    await addGroup(name);
+  };
+
+  const handleUpdateGroup = async (g) => {
+    await updateGroup(g);
+  };
+
+  const handleDeleteGroup = async (groupId) => {
+    if (!confirm("Delete group? Its categories will be moved to Ungrouped.")) return;
+    const payload = await deleteGroup(groupId);
+    if (payload) startUndo({ type: "deleteGroup", payload });
+  };
+
+  const handleUpdateSettings = async (s) => {
+    await updateSettings(s);
+  };
+
+  /* -------------------- Stats (same logic as before, but using DB-driven data) -------------------- */
+  const stats = calculateStats(data);
+
+  /* -------------------- UI Helpers -------------------- */
+  function groupNameForCategory(catId) {
+    const cat = data.categories.find((c) => c.id === catId);
+    if (!cat) return "";
+    const g = data.groups.find((x) => x.id === cat.groupId);
+    return g ? g.name : "";
+  }
+
+  function colorForLeft(leftMs, goalMs) {
+    if (goalMs === 0) return "gray";
+    const progress = 1 - leftMs / goalMs;
+    if (progress >= 1) return "green";
+    if (progress >= 0.6) return "blue";
+    if (progress >= 0.3) return "yellow";
+    return "red";
+  }
+
+  if (!loaded) {
+    return (
+      <div className="min-h-screen p-6 flex items-center justify-center bg-gradient-to-br from-purple-900 via-black to-gray-900 text-white">
+        <div className="text-center">
+          <div className="text-2xl font-semibold mb-2">Loading…</div>
+          <div className="text-sm text-white/70">Preparing your data</div>
+        </div>
+      </div>
+    );
+  }
+
+  /* -------------------- Render (redesigned) -------------------- */
+  return (
+    <div className="min-h-screen p-6 bg-gradient-to-br from-purple-950 via-gray-900 to-black text-white font-sans">
+      <div className="max-w-7xl mx-auto">
+        <header className="flex items-center justify-between mb-6">
+          <div className="flex items-start gap-4">
+            <div className="rounded-lg p-3 bg-gradient-to-br from-indigo-600 to-purple-700 shadow-2xl ring-1 ring-white/10">
+              <svg width="36" height="36" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <rect x="1.5" y="1.5" width="21" height="21" rx="6" stroke="white" strokeWidth="1.2" opacity="0.06" />
+                <path d="M6 12h12M6 8h12M6 16h12" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </div>
+            <div>
+              <h1 className="text-2xl font-extrabold tracking-tight leading-tight">Timers • Deep Analysis</h1>
+              <div className="text-xs text-white/70 mt-1">Control, correct, and see exactly how much time you need to hit goals.</div>
+            </div>
+          </div>
+
+          <nav className="flex gap-2 items-center">
+            <NavButton active={page === "dashboard"} onClick={() => setPage("dashboard")}>Overview</NavButton>
+            <NavButton active={page === "sessions"} onClick={() => setPage("sessions")}>Sessions</NavButton>
+            <NavButton active={page === "charts"} onClick={() => setPage("charts")}>Charts</NavButton>
+            <NavButton active={page === "settings"} onClick={() => setPage("settings")}>Settings</NavButton>
+            <div className="ml-2 px-3 py-1 rounded bg-white/6 text-xs">{data.sessions.length} sessions</div>
+          </nav>
+        </header>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+          <aside className="md:col-span-1 bg-white/4 backdrop-blur-sm p-4 rounded-2xl shadow-xl border border-white/6">
+            <h2 className="font-semibold mb-3 text-lg">Quick timer</h2>
+
+            <div className="flex flex-wrap gap-2 mb-4">
+              {data.categories.map((c) => (
+                <button
+                  key={c.id}
+                  onClick={() => setSelectedCategory(c.id)}
+                  className={`flex items-center gap-2 px-3 py-1 rounded-full text-sm font-medium shadow-sm transition-transform hover:-translate-y-0.5`}
+                  style={{
+                    background: selectedCategory === c.id ? "linear-gradient(90deg,#f59e0b,#ef4444)" : "rgba(255,255,255,0.03)",
+                    color: selectedCategory === c.id ? "black" : "white",
+                  }}
+                >
+                  <span style={{ width: 10, height: 10, background: c.color, borderRadius: 4, display: "inline-block" }} />
+                  {c.name}
+                </button>
+              ))}
+            </div>
+
+            <div className="mb-4">
+              {data.running ? (
+                <div className="flex flex-col gap-3">
+                  <div className="text-sm text-white/80">Running: <strong className="text-white">{data.categories.find((x) => x.id === data.running.categoryId)?.name}</strong> — <span className="italic text-xs text-white/60">{groupNameForCategory(data.running.categoryId)}</span></div>
+
+                  <div className="text-2xl font-bold">{formatDuration(nowMs - new Date(data.running.startISO))}</div>
+
+                  <div className="flex gap-2 items-center">
+                    <select value={data.running.categoryId} onChange={(e) => handleChangeRunningCategory(e.target.value)} className="flex-1 bg-white/6 text-white border border-white/6 rounded px-3 py-2">
+                      {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name} ({data.groups.find(g => g.id === c.groupId)?.name || ''})</option>)}
+                    </select>
+                    <button onClick={() => handleStopTimer()} className="px-4 py-2 rounded-lg bg-rose-600 text-white font-semibold shadow">Stop</button>
+                  </div>
+
+                  <div className="flex gap-2">
+                    <button onClick={async () => {
+                      const note = prompt("Note for this session (optional)") || "";
+                      await handleStopTimer(note);
+                    }} className="px-3 py-2 rounded-lg border border-white/6 bg-white/6 text-sm">Stop + note</button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex gap-2">
+                  <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="flex-1 bg-white/6 text-white border border-white/6 rounded px-3 py-2">
+                    {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name} ({data.groups.find(g => g.id === c.groupId)?.name || ''})</option>)}
+                  </select>
+                  <button onClick={() => handleStartTimer(selectedCategory)} className="px-4 py-2 rounded-lg bg-emerald-500 text-black font-semibold shadow">Start</button>
+                </div>
+              )}
+            </div>
+
+            <details className="mb-4 bg-white/6 p-3 rounded-lg">
+              <summary className="text-sm font-medium cursor-pointer">➕ Add manual session</summary>
+              <div className="mt-3 flex flex-col gap-3">
+                <select value={selectedCategory} onChange={(e) => setSelectedCategory(e.target.value)} className="bg-white/5 text-white border border-white/6 rounded px-3 py-2">
+                  {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+                <div className="flex gap-2">
+                  <input type="date" value={manual.date} onChange={(e) => setManual((m) => ({ ...m, date: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" />
+                  <input type="time" value={manual.start} onChange={(e) => setManual((m) => ({ ...m, start: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" />
+                  <input type="time" value={manual.end} onChange={(e) => setManual((m) => ({ ...m, end: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" />
+                </div>
+                <input placeholder="note" value={manual.note} onChange={(e) => setManual((m) => ({ ...m, note: e.target.value }))} className="border rounded px-2 py-2 bg-transparent" />
+                <div className="flex gap-2">
+                  <button onClick={async () => {
+                    if (!manual.date || !manual.start || !manual.end) return alert("fill date/start/end");
+                    const startISO = new Date(`${manual.date}T${manual.start}`).toISOString();
+                    const endISO = new Date(`${manual.date}T${manual.end}`).toISOString();
+                    const ok = await handleAddManualSession(selectedCategory, startISO, endISO, manual.note);
+                    if (!ok) return alert("invalid times");
+                    setManual({ date: "", start: "", end: "", note: "" });
+                  }} className="px-3 py-2 rounded-lg bg-indigo-600 text-white font-semibold">Add</button>
+                  <button onClick={() => setManual({ date: "", start: "", end: "", note: "" })} className="px-3 py-2 rounded-lg border border-white/6">Clear</button>
+                </div>
+              </div>
+            </details>
+
+            <div className="mt-4 border-t border-white/6 pt-3 text-sm">
+              <div className="flex items-center justify-between"><div>Total:</div><div className="font-semibold">{formatDuration(stats.totalMs)}</div></div>
+              <div className="flex items-center justify-between mt-1"><div>Avg / day:</div><div className="font-semibold">{stats.avgPerDayH.toFixed(2)} h</div></div>
+              <div className="flex items-center justify-between mt-1"><div>Days tracked:</div><div className="font-semibold">{stats.daysTracked}</div></div>
+            </div>
+          </aside>
+
+          <main className="md:col-span-2 space-y-6">
+            {page === "dashboard" && (
+              <section className="bg-white/4 backdrop-blur-sm p-6 rounded-2xl shadow-2xl border border-white/6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-xl font-bold">Overview</h2>
+                  <div className="text-sm text-white/80">Global goal: <strong>{data.settings.globalGoalHours || 0} h</strong></div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                  <div className="p-4 rounded-lg bg-gradient-to-br from-white/3 to-white/2 border border-white/4">
+                    <div className="text-sm text-white/80">Total time</div>
+                    <div className="text-2xl font-extrabold">{formatDuration(stats.totalMs)}</div>
+                    <div className="text-xs text-white/60 mt-1">Since first session ({data.sessions.length} sessions)</div>
+                    <div className="mt-3">
+                      <ProgressBar value={stats.totalMs} max={Math.max(stats.totalMs, hoursToMs(data.settings.globalGoalHours || 0))} color="#f59e0b" />
+                      <div className="text-xs mt-2 text-white/60">Progress vs global goal</div>
+                    </div>
+                  </div>
+
+                  <div className="p-4 rounded-lg bg-gradient-to-br from-white/3 to-white/2 border border-white/4">
+                    <div className="text-sm text-white/80">Average per day</div>
+                    <div className="text-2xl font-extrabold">{stats.avgPerDayH.toFixed(2)} h</div>
+                    <div className="text-xs text-white/60 mt-1">Based on {stats.daysTracked} days</div>
+                  </div>
+
+                  <div className="p-4 rounded-lg bg-gradient-to-br from-white/3 to-white/2 border border-white/4">
+                    <div className="text-sm text-white/80">To global goal</div>
+                    <div className="text-2xl font-extrabold">{(stats.globalLeftMs / 3600_000).toFixed(2)} h</div>
+                    <div className="text-xs text-white/60 mt-1">Est. days at current pace: {stats.globalEstimatedDays === Infinity ? "—" : stats.globalEstimatedDays + " days"}</div>
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-3">Groups (aggregated)</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {stats.groups.map((g) => {
+                      const color = colorForLeft(g.leftMs, g.goalMs);
+                      const accent =
+                        color === "green" ? "#10b981" : color === "blue" ? "#60a5fa" : color === "yellow" ? "#f59e0b" : color === "red" ? "#ef4444" : "#9ca3af";
+                      return (
+                        <div key={g.id} className="p-4 rounded-xl bg-white/5 flex items-center justify-between border border-white/6 shadow">
+                          <div>
+                            <div className="text-sm font-medium">{g.name}</div>
+                            <div className="text-xs text-white/60">{formatDuration(g.totalMs)}</div>
+                            <div className="text-xs mt-2 flex gap-2 items-center">
+                              <SmallBadge color={color}>{((g.leftMs || 0) / 3600_000).toFixed(2)}h left</SmallBadge>
+                              <span className="text-white/50"> · est: {g.estimatedDays === Infinity ? "—" : g.estimatedDays + "d"}</span>
+                            </div>
+                          </div>
+                          <div className="w-44">
+                            <ProgressBar value={g.totalMs} max={Math.max(1, g.goalMs)} color={g.color || accent} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-3">Categories (breakdown)</h3>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                    {stats.categories.map((c) => {
+                      const color = colorForLeft(c.leftMs, c.goalMs);
+                      return (
+                        <div key={c.id} className="p-4 rounded-xl bg-white/5 flex items-center justify-between border border-white/6 shadow">
+                          <div>
+                            <div className="text-sm font-medium">{c.name} <span className="text-xs text-white/50">({data.groups.find(g => g.id === c.groupId)?.name || ''})</span></div>
+                            <div className="text-xs text-white/60">{formatDuration(c.totalMs)}</div>
+                            <div className="text-xs mt-2 flex gap-2 items-center">
+                              <SmallBadge color={color}>{(c.leftMs / 3600_000).toFixed(2)}h left</SmallBadge>
+                              <span className="text-white/50"> · est: {c.estimatedDays === Infinity ? "—" : c.estimatedDays + "d"}</span>
+                            </div>
+                          </div>
+                          <div className="w-44">
+                            <ProgressBar value={c.totalMs} max={Math.max(1, c.goalMs)} color={c.color} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {page === "sessions" && (
+              <section className="bg-white/4 backdrop-blur-sm p-6 rounded-2xl shadow-2xl border border-white/6">
+                <h2 className="text-xl font-bold mb-4">All sessions</h2>
+                <div className="flex flex-col gap-3">
+                  {data.sessions.map((s) => (
+                    <div key={s.id} className="flex items-center justify-between p-3 rounded-lg hover:bg-white/5 transition-colors">
+                      <div>
+                        <div className="text-sm font-semibold">
+                          {data.categories.find((c) => c.id === s.categoryId)?.name}{" "}
+                          <span className="text-xs text-white/60">({groupNameForCategory(s.categoryId)})</span>
+                        </div>
+                        <div className="text-xs text-white/50">{new Date(s.startISO).toLocaleString()} — {new Date(s.endISO).toLocaleString()}</div>
+                      </div>
+                      <div className="text-right">
+                        <div className="font-medium">{formatDuration(s.durationMs)}</div>
+                        <div className="flex gap-2 mt-2 justify-end">
+                          <button className="text-sm px-3 py-1 rounded-lg border border-white/6" onClick={() => setEditingSession(s)}>Edit</button>
+                          <button className="text-sm px-3 py-1 rounded-lg border border-rose-500 text-rose-400" onClick={() => handleDeleteSession(s.id)}>Delete</button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <AnimatePresence>
+                  {editingSession && (
+                    <div className="fixed inset-0 flex items-center justify-center z-50">
+                      <div className="absolute inset-0 bg-black/40" />
+                      <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="bg-gradient-to-br from-gray-900 to-black p-6 rounded-xl w-full max-w-lg relative z-10 border border-white/6 shadow-2xl">
+                        <h3 className="font-semibold mb-3">Edit session</h3>
+
+                        <label className="block text-xs text-white/70">Category</label>
+                        <select value={editingSession.categoryId} onChange={(e) => setEditingSession((s) => ({ ...s, categoryId: e.target.value }))} className="w-full bg-transparent border border-white/6 rounded px-3 py-2 mb-3">
+                          {data.categories.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                        </select>
+
+                        <label className="block text-xs text-white/70">Start</label>
+                        <input type="datetime-local" value={editingSession.startISO.slice(0, 16)} onChange={(e) => {
+                          const newStart = new Date(e.target.value).toISOString();
+                          setEditingSession((s) => ({ ...s, startISO: newStart, durationMs: new Date(s.endISO) - new Date(newStart) }));
+                        }} className="w-full bg-transparent border border-white/6 rounded px-3 py-2 mb-3" />
+
+                        <label className="block text-xs text-white/70">End</label>
+                        <input type="datetime-local" value={editingSession.endISO.slice(0, 16)} onChange={(e) => {
+                          const newEnd = new Date(e.target.value).toISOString();
+                          setEditingSession((s) => ({ ...s, endISO: newEnd, durationMs: new Date(newEnd) - new Date(s.startISO) }));
+                        }} className="w-full bg-transparent border border-white/6 rounded px-3 py-2 mb-3" />
+
+                        <label className="block text-xs text-white/70">Note</label>
+                        <input value={editingSession.note || ""} onChange={(e) => setEditingSession((s) => ({ ...s, note: e.target.value }))} className="w-full bg-transparent border border-white/6 rounded px-3 py-2 mb-4" />
+
+                        <div className="flex gap-3 justify-end">
+                          <button onClick={() => setEditingSession(null)} className="px-4 py-2 rounded-lg border border-white/6">Cancel</button>
+                          <button onClick={async () => { await handleSaveEditedSession(editingSession); }} className="px-4 py-2 rounded-lg bg-indigo-600 font-semibold">Save</button>
+                        </div>
+                      </motion.div>
+                    </div>
+                  )}
+                </AnimatePresence>
+              </section>
+            )}
+
+            {page === "charts" && (
+              <section className="bg-white/4 backdrop-blur-sm p-6 rounded-2xl shadow-2xl border border-white/6">
+                <h2 className="text-xl font-bold mb-4">Charts</h2>
+
+                <div className="flex gap-3 items-center mb-4">
+                  <div className="text-sm text-white/80">View:</div>
+                  <div className="flex gap-2">
+                    <ChartToggle active={chartMode === "category"} onClick={() => setChartMode("category")}>By category</ChartToggle>
+                    <ChartToggle active={chartMode === "group"} onClick={() => setChartMode("group")}>By group</ChartToggle>
+                    <ChartToggle active={chartMode === "custom"} onClick={() => setChartMode("custom")}>Custom merge</ChartToggle>
+                  </div>
+                </div>
+
+                {chartMode === "custom" && (
+                  <div className="mb-4 p-3 rounded-lg bg-white/5 border border-white/6">
+                    <div className="text-xs text-white/70 mb-2">Select categories to temporarily aggregate (this does not modify data).</div>
+                    <div className="flex flex-wrap gap-2">
+                      {data.categories.map((c) => (
+                        <button key={c.id} onClick={() => setCustomMerge((prev) => prev.includes(c.id) ? prev.filter(x => x !== c.id) : [...prev, c.id])} className={`px-3 py-1 rounded-full text-sm ${customMerge.includes(c.id) ? 'bg-indigo-600 text-white' : 'bg-white/6 text-white'}`}>
+                          {c.name}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="mt-3 text-sm">Custom total: <strong>{formatDuration(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0))}</strong></div>
+                  </div>
+                )}
+
+                <div style={{ height: 280 }} className="mb-6 rounded-lg overflow-hidden border border-white/6">
+                  <ResponsiveContainer>
+                    <LineChart data={stats.series.map((d) => ({ date: d.date.slice(5), hours: +(msToHours(d.ms).toFixed(2)) }))}>
+                      <XAxis dataKey="date" stroke="white" />
+                      <YAxis stroke="white" />
+                      <Tooltip />
+                      <Line type="monotone" dataKey="hours" stroke="#7c3aed" strokeWidth={3} dot={false} />
+                    </LineChart>
+                  </ResponsiveContainer>
+                </div>
+
+                <div style={{ height: 260 }}>
+                  <ResponsiveContainer>
+                    <PieChart>
+                      <Pie
+                        data={
+                          chartMode === "group"
+                            ? stats.groups.map((g) => ({ name: g.name, value: +(msToHours(g.totalMs).toFixed(3)), color: g.color }))
+                            : chartMode === "custom"
+                              ? [{ name: 'Custom', value: +(msToHours(customMerge.reduce((sum, cid) => sum + (data.sessions.filter(s => s.categoryId === cid).reduce((a, b) => a + (b.durationMs || 0), 0)), 0)).toFixed(3)), color: '#60a5fa' }, ...stats.categories.filter(c => !customMerge.includes(c.id)).map(c => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))]
+                              : stats.categories.map((c) => ({ name: c.name, value: +(msToHours(c.totalMs).toFixed(3)), color: c.color }))
+                        }
+                        dataKey="value"
+                        nameKey="name"
+                        outerRadius={90}
+                      >
+                        {(chartMode === 'group' ? stats.groups : chartMode === 'custom' ? [{ name: 'Custom' }, ...stats.categories.filter(c => !customMerge.includes(c.id))] : stats.categories).map((entry, index) => (
+                          <Cell key={`cell-${index}`} fill={entry.color || `hsl(${index * 60},70%,50%)`} />
+                        ))}
+                      </Pie>
+                      <Legend />
+                      <Tooltip />
+                    </PieChart>
+                  </ResponsiveContainer>
+                </div>
+              </section>
+            )}
+
+            {page === "settings" && (
+              <section className="bg-white/4 backdrop-blur-sm p-6 rounded-2xl shadow-2xl border border-white/6">
+                <h2 className="text-xl font-bold mb-3">Settings: groups & categories</h2>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-xs text-white/70">Global goal (hours)</label>
+                    <input type="number" value={data.settings.globalGoalHours || 0} onChange={(e) => handleUpdateSettings({ ...data.settings, globalGoalHours: Number(e.target.value) })} className="w-full rounded px-3 py-2 bg-transparent border border-white/6" />
+                    <div className="text-xs text-white/60 mt-1">Set a global target — dashboard will show time left & estimated days.</div>
+                  </div>
+
+                  <div>
+                    <label className="block text-xs text-white/70">New category (choose group)</label>
+                    <AddCategory onAdd={handleAddCategory} groups={data.groups} />
+                  </div>
+                </div>
+
+                <div className="mt-4">
+                  <h3 className="font-semibold mb-2">Edit categories (assign to group)</h3>
+                  <div className="flex flex-col gap-2">
+                    {data.categories.map((c) => (
+                      <div key={c.id} className="flex items-center gap-2 p-2 rounded bg-white/6">
+                        <input value={c.name} onChange={(e) => handleUpdateCategory({ ...c, name: e.target.value })} className="flex-1 rounded px-2 py-2 bg-transparent border border-white/6" />
+                        <select value={c.groupId} onChange={(e) => handleUpdateCategory({ ...c, groupId: e.target.value })} className="w-36 rounded px-2 py-2 bg-transparent border border-white/6">
+                          {data.groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+                        </select>
+                        <input type="number" value={c.goalHours || 0} onChange={(e) => handleUpdateCategory({ ...c, goalHours: Number(e.target.value) })} className="w-24 rounded px-2 py-2 bg-transparent border border-white/6" />
+                        <input type="color" value={c.color || "#10b981"} onChange={(e) => handleUpdateCategory({ ...c, color: e.target.value })} className="w-12 h-8 rounded" />
+                        {c.id !== DEFAULT_CATEGORY && (
+                          <button className="px-2 py-1 text-rose-400 border border-rose-600/30 rounded" onClick={() => handleDeleteCategory(c.id)}>🗑</button>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="mt-6">
+                  <h3 className="font-semibold mb-2">Manage groups</h3>
+                  <div className="flex flex-col gap-2">
+                    {data.groups.map((g) => (
+                      <div key={g.id} className="flex items-center gap-2 p-2 rounded bg-white/6">
+                        <input value={g.name} onChange={(e) => handleUpdateGroup({ ...g, name: e.target.value })} className="flex-1 rounded px-2 py-2 bg-transparent border border-white/6" />
+                        <input type="number" value={g.goalHours || 0} onChange={(e) => handleUpdateGroup({ ...g, goalHours: Number(e.target.value) })} className="w-24 rounded px-2 py-2 bg-transparent border border-white/6" />
+                        <input type="color" value={g.color || "#60a5fa"} onChange={(e) => handleUpdateGroup({ ...g, color: e.target.value })} className="w-12 h-8 rounded" />
+                        {g.id !== DEFAULT_GROUP && <button onClick={() => handleDeleteGroup(g.id)} className="px-3 py-1 rounded border border-white/6">Delete</button>}
+                      </div>
+                    ))}
+                    <div className="mt-2">
+                      <button onClick={() => handleAddGroup('New group')} className="px-3 py-2 rounded-lg bg-indigo-600 font-semibold">Add group</button>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="mt-4 text-sm text-white/60">Tip: groups are for aggregation & statistics. Deleting moves categories to Ungrouped. Use editing to correct mistakes — nothing is lost without explicit delete.</div>
+              </section>
+            )}
+          </main>
+        </div>
+
+        <footer className="text-xs text-white/60 mt-6 text-center">Single-file • IndexedDB (Dexie) • Full controls • Undo for deletes</footer>
+
+        <div className="fixed bottom-6 right-6 z-50">
+          <AnimatePresence>
+            {undo && (
+              <motion.div initial={{ y: 20, opacity: 0 }} animate={{ y: 0, opacity: 1 }} exit={{ y: 10, opacity: 0 }} className="bg-gradient-to-br from-gray-800 to-black p-3 rounded-xl shadow-lg border border-white/6 flex items-center gap-3">
+                <div>
+                  <div className="text-sm font-medium">Action removed</div>
+                  <div className="text-xs text-white/60">{undo.type}</div>
+                </div>
+                <div className="flex gap-2">
+                  <button onClick={() => performUndo()} className="px-3 py-1 rounded bg-indigo-600 text-white text-sm">Undo</button>
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* -------------------- Small components -------------------- */
+function NavButton({ children, onClick, active }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-4 py-2 rounded-full font-semibold transition-all ${active ? "bg-gradient-to-r from-yellow-400 to-rose-500 text-black shadow-2xl" : "bg-white/6 text-white"}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+function ChartToggle({ children, onClick, active }) {
+  return (
+    <button onClick={onClick} className={`px-3 py-1 rounded-full text-sm ${active ? "bg-white/8 text-white font-semibold" : "bg-white/4 text-white/80"}`}>
+      {children}
+    </button>
+  );
+}
+
+/* -------------------- Add Category UI -------------------- */
+function AddCategory({ onAdd, groups = [] }) {
+  const [name, setName] = useState("");
+  const [color, setColor] = useState("#10b981");
+  const [groupId, setGroupId] = useState(groups[0] ? groups[0].id : DEFAULT_GROUP);
+
+  useEffect(() => {
+    if (groups && groups[0]) setGroupId(groups[0].id);
+  }, [groups]);
+
+  return (
+    <div className="flex gap-2 items-center">
+      <input placeholder="Category name" value={name} onChange={(e) => setName(e.target.value)} className="flex-1 rounded px-3 py-2 bg-transparent border border-white/6" />
+      <select value={groupId} onChange={(e) => setGroupId(e.target.value)} className="rounded px-3 py-2 bg-transparent border border-white/6 w-36">
+        {groups.map(g => <option key={g.id} value={g.id}>{g.name}</option>)}
+      </select>
+      <input type="color" value={color} onChange={(e) => setColor(e.target.value)} className="w-12 h-8 rounded" />
+      <button onClick={() => { if (!name) return alert('enter name'); onAdd(name, color, groupId); setName(''); }} className="px-3 py-2 rounded-lg bg-emerald-500 text-black font-semibold">Add</button>
+    </div>
+  );
+}
