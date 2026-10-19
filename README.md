@@ -57,6 +57,23 @@ npm start
 
 The production server serves the compiled frontend from `frontend/dist` and the API from the same origin. Build the frontend before starting the production server.
 
+### Keep it running locally with PM2
+
+For a persistent local app, build the frontend and start the production server with PM2:
+
+```bash
+npm run build
+pm2 start npm --name focusdeep -- start
+pm2 save
+```
+
+Open **http://localhost:42000**. To manage it later, use `pm2 restart focusdeep`, `pm2 stop focusdeep`, or `pm2 logs focusdeep`. To have PM2 restore the app after a machine reboot, run `pm2 startup` once and follow its printed instruction, then run `pm2 save`. After changing Node.js versions, rebuild the native SQLite dependency and restart the app:
+
+```bash
+npm rebuild better-sqlite3 --prefix backend
+pm2 restart focusdeep
+```
+
 ## Data and backups
 
 The SQLite database and generated snapshots live under `backend/data/` and `backend/backups/`. These are local runtime files and are intentionally excluded from Git. Backups are created on startup and shutdown, every 48 hours while the server is running, and before destructive data operations. Up to 30 snapshots are retained.
